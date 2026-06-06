@@ -252,8 +252,8 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
             match crate::overlay::show_overlays(&handle) {
+                // Sound: show_overlays starts the recurring alert loop itself.
                 Ok(_) => {
-                    crate::sound::play(crate::sound::DEFAULT_ALERT_SOUND);
                     // Already-booted overlay windows get the push; freshly created
                     // ones pull via get_active_alarms on mount.
                     let _ = handle.emit("alarm-fired", &payload);

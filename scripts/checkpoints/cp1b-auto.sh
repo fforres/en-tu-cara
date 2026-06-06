@@ -40,19 +40,23 @@ EOF
   swiftc -O /tmp/entucara-winlist.swift -o "$WINLIST"
 fi
 
+STATE="$HOME/Library/Application Support/dev.fforres.entucara/overlay-state.json"
 echo "== CP1b-auto: overlay panel assertions =="
-pkill -f "En Tu Cara" 2>/dev/null || true; sleep 1
-ENTUCARA_SPIKE_OVERLAY=2 "$APP/Contents/MacOS/en-tu-cara" >/tmp/entucara-spike.log 2>&1 &
+# NOTE: transparent panel windows VANISH from CGWindowList after content load
+# (verified 2026-06-05) — ground truth is the app's test-mode overlay-state.json;
+# winlist output is informational only.
+rm -f "$STATE"; pkill -f "En Tu Cara" 2>/dev/null || true; sleep 1
+ENTUCARA_TEST_MODE=1 ENTUCARA_SPIKE_OVERLAY=2 "$APP/Contents/MacOS/en-tu-cara" >/tmp/entucara-spike.log 2>&1 &
 sleep 7
-RESULT=$("$WINLIST")
-SCREENS=$(echo "$RESULT" | sed -E 's/screens=([0-9]+).*/\1/')
-PANELS=$(echo "$RESULT" | sed -E 's/.*panels=([0-9]+)/\1/')
+SCREENS=$("$WINLIST" | sed -E 's/screens=([0-9]+).*/\1/')
+PANELS=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo 0)
+echo "  (winlist informational: $("$WINLIST"))"
 sleep 9  # let spike self-dismiss
-DISMISSED=$("$WINLIST" | sed -E 's/.*panels=([0-9]+)/\1/')
+DISMISSED=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo "?")
 pkill -f "En Tu Cara" 2>/dev/null || true
 
 grep -q "SPIKE_OVERLAY shown" /tmp/entucara-spike.log && pass "spike fired ($(grep 'shown' /tmp/entucara-spike.log))" || fail "spike never fired"
-[[ "$PANELS" == "$SCREENS" && "$PANELS" -ge 1 ]] && pass "one ScreenSaver-level (1000) panel per display ($PANELS/$SCREENS)" \
+[[ "$PANELS" == "$SCREENS" && "$PANELS" -ge 1 ]] && pass "one panel per display ($PANELS/$SCREENS, via overlay-state)" \
   || fail "panel/display mismatch: $PANELS panels for $SCREENS screens"
 [[ "$DISMISSED" == "0" ]] && pass "panels dismissed cleanly" || fail "$DISMISSED panel(s) leaked after dismiss"
 

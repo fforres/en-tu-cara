@@ -26,6 +26,24 @@ tauri_panel! {
 
 const OVERLAY_LABEL_PREFIX: &str = "overlay-";
 
+/// Test-mode ground truth for checkpoint scripts: CGWindowList stops listing
+/// transparent panel windows after their content loads (verified 2026-06-05),
+/// so cp1b/cp3 assert against this file instead.
+fn write_overlay_state(labels: &[String]) {
+    if !crate::testmode::is_test_mode() {
+        return;
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        let dir = std::path::Path::new(&home).join("Library/Application Support/dev.fforres.entucara");
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join("overlay-state.json"),
+            serde_json::json!({ "overlays": labels }).to_string(),
+        );
+    }
+}
+
+
 /// Spawn one takeover panel per connected display. Returns the labels created.
 ///
 /// If overlays are ALREADY live (T-0 firing while the T-5 alert is still up —
@@ -46,6 +64,8 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
                 panel.order_front_regardless();
             }
         }
+        crate::sound::start_alert_loop(app);
+        write_overlay_state(&live);
         return Ok(live);
     }
 
@@ -110,12 +130,17 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         labels.push(label);
     }
 
+    // Recurring alert sound: loops while panels are up, stops on close (user req).
+    crate::sound::start_alert_loop(app);
+    write_overlay_state(&labels);
     Ok(labels)
 }
 
 /// Close every overlay panel.
 #[tauri::command]
 pub fn close_overlays(app: AppHandle) {
+    crate::sound::stop_alert_loop();
+    write_overlay_state(&[]);
     for (label, _) in app.webview_windows() {
         if label.starts_with(OVERLAY_LABEL_PREFIX) {
             if let Ok(panel) = app.get_webview_panel(&label) {

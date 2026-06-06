@@ -32,6 +32,12 @@ function countdownLabel(payload: AlarmPayload, now: Date): string {
   return `starts in ${m}:${String(s).padStart(2, "0")}`;
 }
 
+// Identical on EVERY display, active or not — system colors (Canvas) resolve
+// per-window appearance and made each monitor a different shade (CP1b-human #2).
+const BACKDROP = "rgba(22, 22, 26, 0.55)";
+const CARD_BG = "rgba(30, 30, 34, 0.92)";
+const TEXT = "rgba(255, 255, 255, 0.95)";
+
 export function OverlayAlert() {
   // Secondary displays render frosted glass only — the card shows once, on the
   // primary display (CP1b-human feedback). The native NSVisualEffectView behind
@@ -79,27 +85,18 @@ export function OverlayAlert() {
   }, [alarms, events]);
 
   if (role === "dim") {
-    // Frost-only: the native blur does the work; a light tint + click-to-dismiss.
-    return (
-      <main
-        onClick={() => invoke("dismiss_alarms")}
-        title="Click to dismiss"
-        style={{
-          height: "100%",
-          background: "color-mix(in srgb, Canvas 35%, transparent)",
-          cursor: "pointer",
-        }}
-      />
-    );
+    // Tint-only companion panel. Deliberately NOT clickable — dismissal happens
+    // only via the explicit buttons on the primary display (user request:
+    // accidental clicks must never kill an alarm).
+    return <main style={{ height: "100%", background: BACKDROP }} />;
   }
 
   return (
     <main
       style={{
         font: "17px system-ui, -apple-system, sans-serif",
-        colorScheme: "light dark",
-        background: "color-mix(in srgb, Canvas 40%, transparent)",
-        color: "CanvasText",
+        background: BACKDROP,
+        color: TEXT,
         height: "100%",
         display: "flex",
         alignItems: "center",
@@ -123,9 +120,9 @@ export function OverlayAlert() {
               font: "inherit",
               padding: "10px 28px",
               borderRadius: 8,
-              border: "1px solid color-mix(in srgb, CanvasText 25%, transparent)",
-              background: "color-mix(in srgb, Canvas 60%, transparent)",
-              color: "CanvasText",
+              border: "1px solid rgba(255,255,255,0.3)",
+              background: "rgba(255,255,255,0.1)",
+              color: TEXT,
               cursor: "pointer",
             }}
           >
@@ -144,7 +141,7 @@ export function OverlayAlert() {
             gap: 10,
             padding: "24px 40px",
             borderRadius: 14,
-            background: "color-mix(in srgb, Canvas 75%, transparent)",
+            background: CARD_BG,
             maxWidth: 720,
           }}
         >
@@ -177,8 +174,8 @@ export function OverlayAlert() {
                   padding: "10px 28px",
                   borderRadius: 8,
                   border: "none",
-                  background: "Highlight",
-                  color: "HighlightText",
+                  background: "#3478f6",
+                  color: "#fff",
                   cursor: "pointer",
                 }}
               >
@@ -191,9 +188,9 @@ export function OverlayAlert() {
                 font: "inherit",
                 padding: "10px 28px",
                 borderRadius: 8,
-                border: "1px solid color-mix(in srgb, CanvasText 25%, transparent)",
+                border: "1px solid rgba(255,255,255,0.3)",
                 background: "transparent",
-                color: "CanvasText",
+                color: TEXT,
                 cursor: "pointer",
               }}
             >
@@ -213,9 +210,9 @@ export function OverlayAlert() {
                   fontSize: 13,
                   padding: "5px 14px",
                   borderRadius: 6,
-                  border: "1px solid color-mix(in srgb, CanvasText 20%, transparent)",
+                  border: "1px solid rgba(255,255,255,0.25)",
                   background: "transparent",
-                  color: "CanvasText",
+                  color: TEXT,
                   opacity: 0.8,
                   cursor: "pointer",
                 }}
