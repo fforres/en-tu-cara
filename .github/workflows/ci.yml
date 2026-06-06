@@ -1,0 +1,59 @@
+name: CI
+
+# Runs the full test suite on every PR (and on pushes to main). The `frontend`
+# and `rust` checks are required by the "Require passing tests" ruleset, so a PR
+# can't merge to main until both are green. See https://github.com/fforres/en-tu-cara/settings/rules
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      # pnpm version comes from package.json "packageManager" (pnpm@11.x).
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm typecheck
+      - run: pnpm lint
+      - run: pnpm test
+
+  rust:
+    name: rust
+    runs-on: macos-14 # macOS-only app: EventKit / NSPanel code is cfg(macos)
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # tauri::generate_context!() embeds frontendDist (../dist) at compile time,
+      # so the bundle must be built before the crate (and its tests) will compile.
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      - run: cargo test --manifest-path src-tauri/Cargo.toml

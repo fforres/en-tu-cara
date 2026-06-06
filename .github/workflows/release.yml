@@ -31,15 +31,16 @@ jobs:
   release:
     runs-on: macos-14 # Apple Silicon runner; builds the universal binary.
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.tag || github.ref_name }}
 
-      - uses: pnpm/action-setup@v4
+      # pnpm version comes from package.json "packageManager" (pnpm@11.x).
+      - uses: pnpm/action-setup@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 20
+          node-version: 24
           cache: pnpm
 
       - uses: dtolnay/rust-toolchain@stable
