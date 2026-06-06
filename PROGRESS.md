@@ -25,6 +25,10 @@ settings (Phase 7), hardening (Phase 8).
 - CP3-auto (2026-06-05) — injected-event lifecycle in 25 s: T-5 overlay 3/3 displays,
   [t_minus_5, t_zero] sequence, 0.0 s latency, declined never fires. CAUGHT overlay
   recreate crash (ObjC exception → SIGABRT) — fixed via reuse-live-panels
+- CP7 (2026-06-06) — settings integration: lead_minutes=1 → early alert scheduled
+  exactly 60s before start (fire-log proven); alert_tentative=false suppresses w/
+  accepted control firing; future-versioned settings file tolerated. 79 TS tests
+  (15 registry/fuzzy + 10 component) + 24 Rust tests. Visual evidence docs/evidence/cp7/
 - REAL-PIPELINE E2E (2026-06-05) — real EventKit event created/discovered/fired:
   T-0 latency 0.57 s, Join link extracted from notes, auto-cleanup verified.
   RAM: 76 MB idle / 88 MB with 3 overlay panels (main process RSS)
