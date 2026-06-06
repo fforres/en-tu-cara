@@ -2,15 +2,17 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./global.css";
-import { runStartupUpdateCheck } from "./lib/updater";
+import { notifyIfUpdated, runStartupUpdateCheck } from "./lib/updater";
 
 // Self-update once per launch, from the always-loaded tray window only (avoid
-// N parallel checks across overlay/settings webviews). A few seconds after boot
-// so it never competes with the first calendar fetch. See src/lib/updater.ts +
-// docs/RELEASING.md.
+// N parallel checks across overlay/settings webviews). First announce if we just
+// updated (compares running vs last-recorded version), then a few seconds after
+// boot check for the next update so it never competes with the first calendar
+// fetch. See src/lib/updater.ts + docs/RELEASING.md.
 if (!import.meta.env.DEV) {
   const isTray = !new URLSearchParams(window.location.search).get("window");
   if (isTray) {
+    void notifyIfUpdated();
     setTimeout(() => void runStartupUpdateCheck(), 8000);
   }
 }

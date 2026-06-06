@@ -1,6 +1,5 @@
-// Tray popover (Phase 4) — structure per reference-images/tray-example.png,
-// styling deliberately RAW macOS: system-ui font, CSS system colors,
-// color-scheme aware. No custom chrome.
+// Tray popover (Phase 4) — styling deliberately RAW macOS: system-ui font,
+// CSS system colors, color-scheme aware. No custom chrome.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";

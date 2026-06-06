@@ -82,6 +82,6 @@ settings (Phase 7), hardening (Phase 8).
 
 ## known limitations / parked
 
-- The 7 settings reference PNGs were lost in a scaffolding accident (2026-06-05);
-  `docs/SETTINGS-REFERENCE.md` is the substitute. Felipe to re-screenshot
-  In Your Face's settings when convenient.
+- The settings reference materials (screenshots + transcription doc) were
+  removed in the open-source cleanup (2026-06-06). The shipped settings UI
+  (`src/windows/settings/`) is the source of truth now.

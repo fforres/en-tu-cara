@@ -12,6 +12,7 @@
 #![allow(clippy::unused_unit)]
 
 use tauri::{
+    image::Image,
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager, PhysicalPosition, PhysicalSize,
@@ -100,8 +101,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     setup_popover_panel(app)?;
 
+    // Dedicated menu-bar glyph (assets/icon-options/tray-template/tray-4-5),
+    // NOT the colorful app icon. Embedded at compile time; template mode renders
+    // it monochrome and adapts to the light/dark menu bar.
+    let tray_icon =
+        Image::from_bytes(include_bytes!("../icons/tray.png")).expect("valid tray icon PNG");
+
     TrayIconBuilder::with_id("main")
-        .icon(app.default_window_icon().expect("bundled icon").clone())
+        .icon(tray_icon)
         .icon_as_template(true) // adapts to light/dark menu bar
         .menu(&menu)
         .show_menu_on_left_click(false) // left = popover, right = menu

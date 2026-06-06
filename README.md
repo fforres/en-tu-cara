@@ -7,12 +7,15 @@ meeting start.
 
 **Stack:** Tauri v2 · React + TypeScript (Vite) · Rust. macOS 14+.
 
+<p align="center">
+  <img src="docs/evidence/cp7/settings-alerts.png" width="49%" alt="Alerts settings — lead time, sound, repeat interval, snooze durations" />
+  <img src="docs/evidence/cp7/settings-general.png" width="49%" alt="General settings — start at login" />
+</p>
+
 | Doc                            | What's in it                                                       |
 | ------------------------------ | ------------------------------------------------------------------ |
 | `PLAN.md`                      | Phased build plan, checkpoints, risk register                      |
 | `PROGRESS.md`                  | Current state, passed checkpoints, NEEDS-HUMAN queue, decision log |
-| `docs/framework-research.md` | Why Tauri + EventKit (decision record)                             |
-| `reference-images/`            | Tray + settings UI references                                      |
 
 ## Prerequisites
 

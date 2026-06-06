@@ -8,6 +8,7 @@ mod calendar;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod scheduler;
+mod paths;
 mod settings;
 #[cfg(target_os = "macos")]
 mod sound;
@@ -18,7 +19,24 @@ mod tray;
 use tauri::Manager;
 
 pub fn run() {
+    // Skyward data dir (~/.config/skyward/en-tu-cara) for logs + exports.
+    paths::ensure();
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: paths::logs_dir(),
+                        file_name: Some("en-tu-cara".to_string()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Second launch → just surface the popover of the running instance.
             if let Some(win) = app.get_webview_window("tray-popover") {
@@ -31,6 +49,7 @@ pub fn run() {
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
@@ -59,6 +78,12 @@ pub fn run() {
             settings::list_system_sounds,
         ])
         .setup(|app| {
+            log::info!(
+                "En Tu Cara v{} started — data dir {}",
+                app.package_info().version,
+                paths::data_dir().display()
+            );
+
             // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
             // launch. Info.plist LSUIElement covers packaged builds; this covers dev.
             #[cfg(target_os = "macos")]
@@ -114,7 +139,9 @@ pub fn run() {
             calendar::maybe_run_real_e2e();
 
             // Persisted alarm state + settings + the production scheduler loop.
-            let data_dir = app.path().app_data_dir()?;
+            // Persist state + settings in the Skyward data dir (~/.config/skyward/
+            // en-tu-cara), not ~/Library — no existing users to migrate (PROGRESS).
+            let data_dir = paths::data_dir();
             app.manage(state::SharedState::load(data_dir.clone()));
             app.manage(settings::SettingsStore::load(data_dir));
             #[cfg(target_os = "macos")]

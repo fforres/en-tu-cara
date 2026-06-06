@@ -1,6 +1,6 @@
 [package]
 name = "en-tu-cara"
-version = "0.1.0"
+version = "0.1.1"
 description = "Unmissable meeting alerts for macOS. Fully local."
 authors = ["fforres"]
 edition = "2021"
@@ -21,6 +21,7 @@ tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
+log = "0.4"
 
 # Overlay: native NSPanel (screenSaver level + collectionBehavior). Pinned to exact
 # rev on the v2.1 branch — branch is not default; unpinned = non-reproducible (PLAN §1).
@@ -41,3 +42,7 @@ objc2-app-kit = "0.3"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Native notification on self-update (so a deploy is visibly confirmed).
+tauri-plugin-notification = "2"
+# File logging into the Skyward data dir (~/.config/skyward/en-tu-cara/logs).
+tauri-plugin-log = "2"
