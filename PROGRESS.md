@@ -14,8 +14,11 @@ settings (Phase 7), hardening (Phase 8).
   rebuild (ad-hoc signing OK so far); occurrence expansion PROVEN (17 series);
   RSVP 126/147; dedup 209→147
 - CP1b-auto (2026-06-05) — 3/3 ScreenSaver-level panels (one per display), clean dismiss
-- CP1d (2026-06-05) — fire latency 1 ms on AC power, WORST-case arm (no assertion);
-  battery-condition re-test deferred to dogfood; windowed latencyCritical kept anyway
+- CP1d (2026-06-05, TAGGED) — fire latency on AC power: none/35min-backgrounded = 0 ms
+  (the original slow arm completed before the fast rerun), none/5min = 1 ms,
+  latencycritical/60s = 1 ms, real-pipeline T-0 = 0.57 s. All ≤5 s target. App Nap
+  showed NO measurable throttling on AC w/ 3 displays; battery-condition re-test
+  deferred to dogfood; windowed latencyCritical assertion kept regardless (cheap insurance)
 - CP2 (2026-06-05) — 54 TS tests: 35 link fixtures (8 providers + generic), 18 classify edges
 - CP3-auto (2026-06-05) — injected-event lifecycle in 25 s: T-5 overlay 3/3 displays,
   [t_minus_5, t_zero] sequence, 0.0 s latency, declined never fires. CAUGHT overlay

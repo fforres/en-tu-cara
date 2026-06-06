@@ -166,7 +166,7 @@ en-tu-cara/
 | TCC grant keyed to wrong identity | Stable signed bundle id from Phase 0; spikes use it | 0–1a |
 | eventkit-rs lacks occurrence expansion/RSVP | Proven or replaced at gate; Rust estimate flagged conditional | 1a |
 | EventKit stale without Calendar.app | Freshness probe + pre-committed fallback ladder (refresh→notice→escalate) | 1a |
-| App Nap throttling | `.userInitiated|.latencyCritical` windowed assertion; 3-arm latency data | 1d |
+| App Nap throttling | ✅ MEASURED (cp-1d): 0–1 ms all arms incl. 35-min no-assertion on AC; windowed latencyCritical kept as cheap insurance; battery re-test in dogfood | 1d |
 | System sleep ≠ App Nap | willSleep/didWake hooks; fire-on-wake-if-ongoing; honest target | 3 |
 | Dead EKEventStoreChanged observer masked by poll | Main-thread registration; observer-isolation test (poll disabled) | 3 |
 | tauri-nspanel breaks/abandoned | Pinned rev; isolated overlay.rs; objc2 fallback recipe in report | 1b |
