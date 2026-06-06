@@ -3,17 +3,22 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./global.css";
 import { notifyIfUpdated, runStartupUpdateCheck } from "./lib/updater";
+import { requestStartupPermissions } from "./lib/permissions";
 
-// Self-update once per launch, from the dedicated hidden `background` window
-// only (avoid N parallel checks across the overlay/settings webviews). First
-// announce if we just updated (running vs last-recorded version), then a few
-// seconds after boot check for the next update so it never competes with the
-// first calendar fetch. See src/lib/updater.ts + docs/RELEASING.md.
-if (!import.meta.env.DEV) {
+// Startup chores run from the dedicated hidden `background` window only (so they
+// happen once, not per overlay/settings webview). See src/lib/{permissions,
+// updater}.ts + docs/RELEASING.md.
+{
   const isBackground = new URLSearchParams(window.location.search).get("window") === "background";
   if (isBackground) {
-    void notifyIfUpdated();
-    setTimeout(() => void runStartupUpdateCheck(), 8000);
+    // Request OS permissions (calendar / notifications) on first launch — in dev
+    // too, since the dev binary has its own TCC identity to grant.
+    void requestStartupPermissions();
+    // Self-update only in release builds.
+    if (!import.meta.env.DEV) {
+      void notifyIfUpdated();
+      setTimeout(() => void runStartupUpdateCheck(), 8000);
+    }
   }
 }
 

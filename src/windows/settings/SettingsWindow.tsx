@@ -74,12 +74,16 @@ function ControlView({
   def,
   settings,
   calendars,
+  calStatus,
+  onGrantCalendar,
   sounds,
   update,
 }: {
   def: SettingDef;
   settings: Settings;
   calendars: CalendarInfo[];
+  calStatus: string;
+  onGrantCalendar: () => void;
   sounds: string[];
   update: (patch: Partial<Settings>) => void;
 }) {
@@ -184,6 +188,29 @@ function ControlView({
       );
     }
     case "calendar-list": {
+      // Gate the list behind calendar authorization — offer a way to grant it.
+      if (calStatus !== "FullAccess") {
+        const denied = calStatus === "Denied" || calStatus === "Restricted";
+        return (
+          <div
+            style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" }}
+          >
+            <span style={{ color: css.secondary, fontSize: 12, maxWidth: 360 }}>
+              {denied
+                ? "Calendar access is turned off. Enable En Tu Cara under System Settings → Privacy & Security → Calendars, then reopen this window."
+                : "En Tu Cara needs access to your calendars to alert you about meetings."}
+            </span>
+            {!denied && (
+              <button
+                onClick={onGrantCalendar}
+                style={{ font: "inherit", padding: "4px 12px", cursor: "pointer" }}
+              >
+                Grant calendar access
+              </button>
+            )}
+          </div>
+        );
+      }
       const enabled = settings.enabled_calendar_ids; // null = all
       const isOn = (id: string) => enabled === null || enabled.includes(id);
       const setCal = (id: string, on: boolean) => {
@@ -240,9 +267,7 @@ function ControlView({
             </div>
           ))}
           {calendars.length === 0 && (
-            <span style={{ color: css.secondary, fontSize: 12 }}>
-              No calendars (grant calendar access first).
-            </span>
+            <span style={{ color: css.secondary, fontSize: 12 }}>No calendars found.</span>
           )}
         </div>
       );
@@ -284,6 +309,7 @@ function ControlView({
 export function SettingsWindow() {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [calendars, setCalendars] = useState<CalendarInfo[]>([]);
+  const [calStatus, setCalStatus] = useState<string>("NotDetermined");
   const [sounds, setSounds] = useState<string[]>([]);
   const [query, setQuery] = useState("");
   const [activeSection, setActiveSection] = useState<SectionId>(() => {
@@ -292,17 +318,31 @@ export function SettingsWindow() {
   });
   const [error, setError] = useState<string | null>(null);
 
+  const refreshCalendars = useCallback(() => {
+    invoke<string>("calendar_authorization_status")
+      .then(setCalStatus)
+      .catch(() => {});
+    invoke<CalendarInfo[]>("list_calendars")
+      .then(setCalendars)
+      .catch(() => setCalendars([]));
+  }, []);
+
+  // Trigger the macOS calendar prompt, then re-read status + calendars.
+  const onGrantCalendar = useCallback(() => {
+    invoke("request_calendar_access")
+      .catch((e) => setError(String(e)))
+      .finally(refreshCalendars);
+  }, [refreshCalendars]);
+
   useEffect(() => {
     invoke<Settings>("get_settings")
       .then(setSettings)
       .catch((e) => setError(String(e)));
-    invoke<CalendarInfo[]>("list_calendars")
-      .then(setCalendars)
-      .catch(() => {});
     invoke<string[]>("list_system_sounds")
       .then(setSounds)
       .catch(() => {});
-  }, []);
+    refreshCalendars();
+  }, [refreshCalendars]);
 
   const update = useCallback((patch: Partial<Settings>) => {
     setSettings((prev) => {
@@ -451,6 +491,8 @@ export function SettingsWindow() {
                 def={setting}
                 settings={settings}
                 calendars={calendars}
+                calStatus={calStatus}
+                onGrantCalendar={onGrantCalendar}
                 sounds={sounds}
                 update={update}
               />
