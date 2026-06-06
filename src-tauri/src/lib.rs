@@ -1,14 +1,60 @@
-// Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-#[tauri::command]
-fn greet(name: &str) -> String {
-    format!("Hello, {}! You've been greeted from Rust!", name)
-}
+//! En Tu Cara — unmissable meeting alerts for macOS. Fully local (EventKit only).
+//! Architecture: PLAN.md §1.
 
-#[cfg_attr(mobile, tauri::mobile_entry_point)]
+#[cfg(target_os = "macos")]
+mod calendar;
+mod testmode;
+mod tray;
+
+use tauri::Manager;
+
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            // Second launch → just surface the popover of the running instance.
+            if let Some(win) = app.get_webview_window("tray-popover") {
+                let _ = win.show();
+                let _ = win.set_focus();
+            }
+        }))
         .plugin(tauri_plugin_opener::init())
-        .invoke_handler(tauri::generate_handler![greet])
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            None,
+        ))
+        .invoke_handler(tauri::generate_handler![
+            testmode::set_mock_now,
+            testmode::advance_clock,
+            testmode::get_fired_log,
+            calendar::calendar_authorization_status,
+            calendar::request_calendar_access,
+            calendar::list_calendars,
+            calendar::fetch_events,
+        ])
+        .setup(|app| {
+            // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
+            // launch. Info.plist LSUIElement covers packaged builds; this covers dev.
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            tray::setup(app.handle())?;
+
+            // CP1a spike automation: dump calendars + events as JSON and keep running.
+            // cp1a-auto.sh launches the packaged app with this env var, reads the file,
+            // validates the schema, and asserts permission persistence across relaunch.
+            #[cfg(target_os = "macos")]
+            if std::env::var("ENTUCARA_SPIKE_DUMP").is_ok_and(|v| v == "1") {
+                let dir = app.path().app_data_dir()?;
+                std::fs::create_dir_all(&dir)?;
+                let dump = calendar::spike_dump();
+                let path = dir.join("spike-dump.json");
+                std::fs::write(&path, serde_json::to_vec_pretty(&dump)?)?;
+                println!("ENTUCARA_SPIKE_DUMP written: {}", path.display());
+            }
+
+            Ok(())
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

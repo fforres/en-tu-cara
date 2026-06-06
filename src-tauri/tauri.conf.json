@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "tauri-app",
+  "productName": "En Tu Cara",
   "version": "0.1.0",
   "identifier": "dev.fforres.entucara",
   "build": {
@@ -10,11 +10,18 @@
     "frontendDist": "../dist"
   },
   "app": {
+    "macOSPrivateApi": false,
     "windows": [
       {
-        "title": "tauri-app",
-        "width": 800,
-        "height": 600
+        "label": "tray-popover",
+        "title": "En Tu Cara",
+        "width": 420,
+        "height": 560,
+        "visible": false,
+        "decorations": false,
+        "resizable": false,
+        "skipTaskbar": true,
+        "alwaysOnTop": true
       }
     ],
     "security": {
@@ -23,7 +30,11 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
+    "category": "Productivity",
+    "macOS": {
+      "minimumSystemVersion": "14.0"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

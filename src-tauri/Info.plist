@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Calendar access: macOS 14+ full-access key + legacy key. TCC requires these
+	     or the permission prompt silently never appears. -->
+	<key>NSCalendarsFullAccessUsageDescription</key>
+	<string>En Tu Cara reads your calendars to alert you before meetings start. Events never leave your Mac.</string>
+	<key>NSCalendarsUsageDescription</key>
+	<string>En Tu Cara reads your calendars to alert you before meetings start. Events never leave your Mac.</string>
+	<!-- Menu-bar agent: no Dock icon, no Cmd-Tab entry. Runtime ActivationPolicy::Accessory
+	     covers `tauri dev` (where this plist is not applied). -->
+	<key>LSUIElement</key>
+	<true/>
+</dict>
+</plist>

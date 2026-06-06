@@ -1,25 +1,34 @@
 [package]
-name = "tauri-app"
+name = "en-tu-cara"
 version = "0.1.0"
-description = "A Tauri App"
-authors = ["you"]
+description = "Unmissable meeting alerts for macOS. Fully local."
+authors = ["fforres"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
-name = "tauri_app_lib"
+name = "en_tu_cara_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-opener = "2"
+tauri-plugin-store = "2"
+tauri-plugin-autostart = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
 
+# Overlay: native NSPanel (screenSaver level + collectionBehavior). Pinned to exact
+# rev on the v2.1 branch — branch is not default; unpinned = non-reproducible (PLAN §1).
+[target.'cfg(target_os = "macos")'.dependencies]
+tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
+# EventKit safe wrapper. Pinned exact: 5-star single-maintainer crate (PLAN risk register);
+# CP1a proves occurrence expansion + RSVP fields or we switch to objc2-event-kit.
+eventkit-rs = "=0.5.6"
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
