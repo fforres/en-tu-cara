@@ -42,6 +42,9 @@ beforeEach(() => {
     if (cmd === "get_settings") {
       return Promise.resolve({ ...DEFAULTS });
     }
+    if (cmd === "calendar_authorization_status") {
+      return Promise.resolve("FullAccess");
+    }
     if (cmd === "list_calendars") {
       return Promise.resolve(CALENDARS);
     }
@@ -121,6 +124,9 @@ describe("SettingsWindow", () => {
       if (cmd === "get_settings") {
         return Promise.resolve({ ...DEFAULTS, enabled_calendar_ids: ["work"] });
       }
+      if (cmd === "calendar_authorization_status") {
+        return Promise.resolve("FullAccess");
+      }
       if (cmd === "list_calendars") {
         return Promise.resolve(CALENDARS);
       }
@@ -135,6 +141,30 @@ describe("SettingsWindow", () => {
     await waitFor(() => {
       const call = invokeMock.mock.calls.findLast((call: unknown[]) => call[0] === "set_settings");
       expect(call![1].settings.enabled_calendar_ids).toBeNull();
+    });
+  });
+
+  it("shows a Grant button when calendar access is undetermined and requests on click", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_settings") {
+        return Promise.resolve({ ...DEFAULTS });
+      }
+      if (cmd === "calendar_authorization_status") {
+        return Promise.resolve("NotDetermined");
+      }
+      if (cmd === "list_calendars") {
+        return Promise.reject(new Error("not authorized"));
+      }
+      return Promise.resolve(undefined);
+    });
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Calendars" }));
+    const grant = await screen.findByRole("button", { name: "Grant calendar access" });
+    fireEvent.click(grant);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some((c: unknown[]) => c[0] === "request_calendar_access")).toBe(
+        true,
+      );
     });
   });
 
