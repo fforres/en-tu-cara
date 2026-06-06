@@ -15,6 +15,8 @@ import {
 } from "./registry";
 import { searchSettings } from "./fuzzy";
 import { THEMES } from "../overlay/themes";
+import { checkForUpdate, installAndRelaunch } from "../../lib/updater";
+import type { Update } from "@tauri-apps/plugin-updater";
 
 interface CalendarInfo {
   id: string;
@@ -67,6 +69,76 @@ function Toggle({
       onChange={(e) => onChange(e.target.checked)}
       style={{ width: 18, height: 18, accentColor: "Highlight" }}
     />
+  );
+}
+
+type CheckState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "uptodate" }
+  | { kind: "available"; version: string; update: Update }
+  | { kind: "installing" }
+  | { kind: "error" };
+
+// App version + a Check-for-Updates button (About tab). Its own component so the
+// check state can use hooks (a switch case can't). __APP_VERSION__ is baked by
+// Vite; the updater commands run here because the settings window holds the
+// updater capability (see capabilities/updater.json, windows: ["*"]).
+function VersionControl() {
+  const [state, setState] = useState<CheckState>({ kind: "idle" });
+
+  const check = useCallback(async () => {
+    setState({ kind: "checking" });
+    const result = await checkForUpdate();
+    if (result.status === "available") {
+      setState({ kind: "available", version: result.version, update: result.update });
+    } else if (result.status === "none") {
+      setState({ kind: "uptodate" });
+    } else {
+      setState({ kind: "error" });
+    }
+  }, []);
+
+  const install = useCallback(async (update: Update) => {
+    setState({ kind: "installing" });
+    try {
+      await installAndRelaunch(update);
+    } catch {
+      setState({ kind: "error" });
+    }
+  }, []);
+
+  const busy = state.kind === "checking" || state.kind === "installing";
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+      <span style={{ fontVariantNumeric: "tabular-nums" }}>v{__APP_VERSION__}</span>
+      {state.kind === "available" ? (
+        <button
+          onClick={() => void install(state.update)}
+          style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+        >
+          Update to v{state.version} &amp; restart
+        </button>
+      ) : (
+        <button
+          onClick={() => void check()}
+          disabled={busy}
+          style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+        >
+          {state.kind === "checking"
+            ? "Checking…"
+            : state.kind === "installing"
+              ? "Installing…"
+              : "Check for Updates"}
+        </button>
+      )}
+      {state.kind === "uptodate" && (
+        <span style={{ color: css.secondary, fontSize: 12 }}>You're up to date</span>
+      )}
+      {state.kind === "error" && (
+        <span style={{ color: css.secondary, fontSize: 12 }}>Couldn't check</span>
+      )}
+    </span>
   );
 }
 
@@ -295,6 +367,23 @@ function ControlView({
           </button>
         </span>
       );
+    }
+    case "link": {
+      return (
+        <button
+          onClick={() => void invoke("open_url", { url: control.url })}
+          style={{ font: "inherit", padding: "4px 12px", cursor: "pointer" }}
+        >
+          {control.button}
+        </button>
+      );
+    }
+    case "version": {
+      return <VersionControl />;
+    }
+    case "note": {
+      // Description-only row (the blurb lives in def.description).
+      return null;
     }
     case "placeholder": {
       return (

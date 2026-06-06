@@ -8,7 +8,8 @@ export type SectionId =
   | "event-filters"
   | "menu-bar"
   | "appearance"
-  | "advanced";
+  | "advanced"
+  | "about";
 
 export const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "general", label: "General" },
@@ -18,6 +19,7 @@ export const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "menu-bar", label: "Menu Bar" },
   { id: "appearance", label: "Appearance" },
   { id: "advanced", label: "Advanced" },
+  { id: "about", label: "About" },
 ];
 
 /** Mirror of the Rust `Settings` struct (settings.rs). */
@@ -51,6 +53,9 @@ export type Control =
   | { kind: "calendar-list" } // enabled_calendar_ids editor
   | { kind: "theme" } // theme picker + demo alert button
   | { kind: "select"; key: keyof Settings; options: Array<{ value: string; label: string }> }
+  | { kind: "link"; url: string; button: string } // opens a URL in the browser
+  | { kind: "version" } // app version + "Check for Updates"
+  | { kind: "note" } // description-only (no control)
   | { kind: "placeholder"; note: string }; // documented not-yet feature
 
 export interface SettingDef {
@@ -224,5 +229,48 @@ export const REGISTRY: SettingDef[] = [
     description: "Timeout for automatic closing (when enabled).",
     keywords: ["timeout", "minutes"],
     control: { kind: "number", key: "auto_close_minutes", min: 1, max: 120, unit: "min" },
+  },
+  // ── About ──────────────────────────────────────────────────────────────
+  {
+    id: "about.version",
+    section: "about",
+    label: "Version",
+    description: "The version you're running.",
+    keywords: ["version", "update", "check for updates", "build"],
+    control: { kind: "version" },
+  },
+  {
+    id: "about.project",
+    section: "about",
+    label: "Open source & volunteer-run",
+    description:
+      "En Tu Cara is free and open source — use it, fork it, ship it. It's maintained by volunteers in their spare time, so there's no SLA or guaranteed support; please be kind. The MIT license just asks that you keep the attribution.",
+    keywords: ["open source", "license", "mit", "volunteer", "free", "attribution"],
+    control: { kind: "note" },
+  },
+  {
+    id: "about.source",
+    section: "about",
+    label: "Source code",
+    description: "Browse the project, star it, or open a pull request on GitHub.",
+    keywords: ["github", "repo", "source", "code", "repository"],
+    control: {
+      kind: "link",
+      url: "https://github.com/fforres/en-tu-cara",
+      button: "View on GitHub",
+    },
+  },
+  {
+    id: "about.support",
+    section: "about",
+    label: "Help & support",
+    description:
+      "Found a bug or have a request? Open an issue — that's the best way to reach the maintainers.",
+    keywords: ["help", "support", "bug", "issue", "report", "feedback", "contact"],
+    control: {
+      kind: "link",
+      url: "https://github.com/fforres/en-tu-cara/issues/new",
+      button: "Report an issue",
+    },
   },
 ];
