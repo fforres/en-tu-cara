@@ -6,7 +6,7 @@ no param → tray popover · `overlay` (+`role=main|dim`) → alert · `settings
 
 ## Layout
 
-- `windows/tray/` — popover UI (spec: reference-images/tray-example.png).
+- `windows/tray/` — popover UI.
 - `windows/overlay/` — takeover alert + `themes.ts`. Has its own AGENTS.md — read
   it before touching colors.
 - `windows/settings/` — registry-driven settings UI. Own AGENTS.md.

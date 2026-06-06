@@ -8,7 +8,6 @@
 > EventKit only (macOS Internet Accounts), no OAuth, no servers.
 > Plan owner: Claude (autonomous execution) + Felipe (human gates).
 > v1 → v2 → v3 on 2026-06-05 after two independent adversarial reviews (§7 changelog).
-> Stack rationale: `docs/framework-research.md` → Decision Record.
 
 ## 0. Product definition (MVP)
 
@@ -18,8 +17,8 @@
 1. Read events from ALL calendars enabled in macOS (EventKit / Internet Accounts).
 2. Alert **5 minutes before start** and **at start** (hard-coded leads for MVP) — except: **declined events never alert**; canceled events never alert; all-day events never alert (still listed in tray).
 3. Alert = full-screen takeover overlay (above fullscreen apps, all Spaces, all displays): event info, Join (only when a video link exists; hidden otherwise), Dismiss, Snooze 1m/5m, native sound. Multiple simultaneous/overlapping events render in ONE overlay as stacked cards with per-event actions.
-4. Tray icon → popover: **ongoing** ("Xm remaining" + pie) and **upcoming** (day-grouped, today/all toggle), calendar color + account, time range, recurrence icon, camera icon/link. Ref: `reference-images/tray-example.png`.
-5. Post-MVP: VS Code-style settings (sidebar TOC + fuzzy search): General, Alerts, Calendars, Event Filters, Appearance, Menu Bar, Advanced. Ref: `docs/SETTINGS-REFERENCE.md`.
+4. Tray icon → popover: **ongoing** ("Xm remaining" + pie) and **upcoming** (day-grouped, today/all toggle), calendar color + account, time range, recurrence icon, camera icon/link.
+5. Post-MVP: VS Code-style settings (sidebar TOC + fuzzy search): General, Alerts, Calendars, Event Filters, Appearance, Menu Bar, Advanced.
 
 **Honest physics (documented, not bugs):** a Mac in system sleep cannot fire an alert (timers pause in sleep — Apple-documented); policy = fire immediately on wake if event still ongoing. EventKit freshness without Calendar.app running is unproven — Phase 1 probes it and a pre-committed fallback exists (§2 CP1a).
 
@@ -159,7 +158,7 @@ en-tu-cara/
 ### Phase 7 — Settings (VS Code style)
 
 - Registry-driven ({id, section, label, description, keywords, control, default}) → TOC + fuzzy search (filter+highlight)
-- Priority: Calendars → Alerts (leads, sound, snooze durations, auto-close toggle, tentative policy) → Event Filters → General → Menu Bar → Appearance → Advanced (per SETTINGS-REFERENCE.md)
+- Priority: Calendars → Alerts (leads, sound, snooze durations, auto-close toggle, tentative policy) → Event Filters → General → Menu Bar → Appearance → Advanced
 - Live-apply; persist
 - **CP7-auto:** fuzzy e2e ("snooze" → highlight in Alerts); calendar toggle → tray ≤75 s; survives restart.
 

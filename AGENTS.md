@@ -35,7 +35,6 @@ bash scripts/checkpoints/cp3-auto.sh   # 25s full alarm-lifecycle e2e (see that 
 - `assets/icon-options/` — user-curated icon sets; never delete, ids are stable.
 - `PLAN.md` / `PROGRESS.md` — phased plan + live state, NEEDS-HUMAN queue,
   decision log. Read PROGRESS.md before starting work; update it after.
-- `reference-images/` — UI references (tray-example.png is the tray spec).
 
 User context: Felipe wants autonomous execution and fast iteration; human gates
 only for what's physically unverifiable (overlay-over-fullscreen, sound).

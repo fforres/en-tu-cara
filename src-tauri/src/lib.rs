@@ -8,6 +8,7 @@ mod calendar;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod scheduler;
+mod paths;
 mod settings;
 #[cfg(target_os = "macos")]
 mod sound;
@@ -18,7 +19,24 @@ mod tray;
 use tauri::Manager;
 
 pub fn run() {
+    // Skyward data dir (~/.config/skyward/en-tu-cara) for logs + exports.
+    paths::ensure();
+
     tauri::Builder::default()
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Folder {
+                        path: paths::logs_dir(),
+                        file_name: Some("en-tu-cara".to_string()),
+                    },
+                ))
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::Stdout,
+                ))
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Second launch → just surface the popover of the running instance.
             if let Some(win) = app.get_webview_window("tray-popover") {
@@ -60,6 +78,12 @@ pub fn run() {
             settings::list_system_sounds,
         ])
         .setup(|app| {
+            log::info!(
+                "En Tu Cara v{} started — data dir {}",
+                app.package_info().version,
+                paths::data_dir().display()
+            );
+
             // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
             // launch. Info.plist LSUIElement covers packaged builds; this covers dev.
             #[cfg(target_os = "macos")]
