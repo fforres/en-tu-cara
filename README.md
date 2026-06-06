@@ -11,7 +11,7 @@ meeting start.
 | ------------------------------ | ------------------------------------------------------------------ |
 | `PLAN.md`                      | Phased build plan, checkpoints, risk register                      |
 | `PROGRESS.md`                  | Current state, passed checkpoints, NEEDS-HUMAN queue, decision log |
-| `framework-research-report.md` | Why Tauri + EventKit (decision record)                             |
+| `docs/framework-research.md` | Why Tauri + EventKit (decision record)                             |
 | `reference-images/`            | Tray + settings UI references                                      |
 
 ## Prerequisites

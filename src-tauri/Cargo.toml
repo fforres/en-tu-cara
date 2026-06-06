@@ -35,3 +35,9 @@ objc2-event-kit = { version = "0.3", features = ["EKEventStore"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
+
+# Self-update (desktop only): download + verify (minisign) + swap the .app in
+# place; process::relaunch() restarts into the new build. See docs/RELEASING.md.
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
