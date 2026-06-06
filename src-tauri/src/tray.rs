@@ -12,6 +12,30 @@ use tauri::{
 };
 
 const SETTINGS_LABEL: &str = "settings";
+const ONBOARDING_LABEL: &str = "onboarding";
+
+/// Paint a freshly-built (hidden) window's background to match the system
+/// light/dark mode — so it doesn't flash white before the webview paints — then
+/// show + focus it and bring the Accessory app forward (it won't activate on
+/// window creation on its own; observed: onscreen=false without this).
+fn present_window(window: &tauri::WebviewWindow) {
+    let bg = match window.theme() {
+        Ok(Theme::Dark) => Color(30, 30, 30, 255),
+        _ => Color(246, 246, 246, 255),
+    };
+    let _ = window.set_background_color(Some(bg));
+    let _ = window.show();
+    let _ = window.set_focus();
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+        if let Some(mtm) = MainThreadMarker::new() {
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        }
+    }
+}
 
 /// Open (or focus) the settings window — a NORMAL decorated window. The app is
 /// an Accessory (no Dock icon), so it doesn't activate on its own; we activate +
@@ -40,27 +64,50 @@ pub fn open_settings_at(app: AppHandle, section: Option<&str>) -> Result<(), Str
             .visible(false)
             .build()
             .map_err(|e| e.to_string())?;
+    present_window(&window);
+    Ok(())
+}
 
-    // Match the system appearance so the window doesn't flash white before the
-    // webview paints (its content uses CSS `Canvas`, which is dark in dark mode).
-    let bg = match window.theme() {
-        Ok(Theme::Dark) => Color(30, 30, 30, 255),
-        _ => Color(246, 246, 246, 255),
-    };
-    let _ = window.set_background_color(Some(bg));
+/// Open (or focus) the first-run onboarding window — a small, fixed-size themed
+/// window. Idempotent.
+fn open_onboarding(app: &AppHandle) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(ONBOARDING_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(
+        app,
+        ONBOARDING_LABEL,
+        tauri::WebviewUrl::App("index.html?window=onboarding".into()),
+    )
+    .title("Welcome to En Tu Cara")
+    .inner_size(520.0, 580.0)
+    .resizable(false)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    present_window(&window);
+    Ok(())
+}
 
-    let _ = window.show();
-    let _ = window.set_focus();
-    // Accessory apps don't activate on window creation — without this the
-    // settings window stays ordered-out (observed: onscreen=false).
-    #[cfg(target_os = "macos")]
-    {
-        use objc2_app_kit::NSApplication;
-        use objc2_foundation::MainThreadMarker;
-        if let Some(mtm) = MainThreadMarker::new() {
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
-        }
+/// Show onboarding on launch if the user hasn't completed it. Invoked from the
+/// background window (post-setup, so window creation is safe — gotcha #3).
+#[tauri::command]
+pub fn maybe_show_onboarding(app: AppHandle) -> Result<(), String> {
+    if app.state::<crate::settings::SettingsStore>().get().onboarded {
+        return Ok(());
+    }
+    open_onboarding(&app)
+}
+
+/// Mark onboarding complete and close the window.
+#[tauri::command]
+pub fn finish_onboarding(app: AppHandle) -> Result<(), String> {
+    app.state::<crate::settings::SettingsStore>()
+        .update(|s| s.onboarded = true);
+    if let Some(win) = app.get_webview_window(ONBOARDING_LABEL) {
+        let _ = win.close();
     }
     Ok(())
 }

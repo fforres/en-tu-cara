@@ -1,10 +1,11 @@
 import { OverlayAlert } from "./windows/overlay/OverlayAlert";
 import { SettingsWindow } from "./windows/settings/SettingsWindow";
+import { OnboardingWindow } from "./windows/onboarding/OnboardingWindow";
 
 // One bundle, multiple windows: the Rust side / tauri.conf opens
 // index.html?window=<kind>. `overlay` = takeover alert, `settings` = the
-// settings window, `background` = the hidden window that only hosts the
-// self-update check (see main.tsx) and renders nothing.
+// settings window, `onboarding` = first-run welcome, `background` = the hidden
+// window that only hosts the self-update check (see main.tsx) and renders nothing.
 export default function App() {
   const kind = new URLSearchParams(window.location.search).get("window");
   if (kind === "overlay") {
@@ -12,6 +13,9 @@ export default function App() {
   }
   if (kind === "settings") {
     return <SettingsWindow />;
+  }
+  if (kind === "onboarding") {
+    return <OnboardingWindow />;
   }
   return null;
 }

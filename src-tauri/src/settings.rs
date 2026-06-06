@@ -42,6 +42,9 @@ pub struct Settings {
     pub theme: String,
     /// Menu-bar tray icon style: "auto" (template, adapts) | "light" | "dark".
     pub tray_icon: String,
+    /// Whether the first-run onboarding window has been completed. Drives whether
+    /// we show onboarding on launch (see tray::maybe_show_onboarding).
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -63,6 +66,7 @@ impl Default for Settings {
             menu_bar_title_chars: 20,
             theme: "frost-dark".into(),
             tray_icon: "auto".into(),
+            onboarded: false,
         }
     }
 }

@@ -24,6 +24,7 @@ const DEFAULTS: Settings = {
   menu_bar_title_chars: 20,
   theme: "frost-dark",
   tray_icon: "auto",
+  onboarded: true,
 };
 
 const CALENDARS = [
