@@ -1,0 +1,84 @@
+name: Cut Release
+
+# Manifest-driven releasing. A release is cut ONLY when the version in
+# release.json changes on main — ordinary merges (that don't touch release.json)
+# never trigger this, and the version number is whatever YOU wrote in the file
+# (CI never guesses it). The tag-exists guard makes re-runs idempotent.
+# See docs/RELEASING.md.
+on:
+  push:
+    branches: [main]
+    paths: ["release.json"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: cut-release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.gate.outputs.release }}
+      tag: ${{ steps.gate.outputs.tag }}
+      body: ${{ steps.gate.outputs.body }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need tags for the idempotency check
+
+      - id: gate
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./release.json').version")
+          TAG="v$VERSION"
+
+          # The build files must agree with release.json — `pnpm release` keeps
+          # them in sync; this catches a hand-edit that forgot to propagate.
+          node -e '
+            const fs = require("fs");
+            const want = require("./release.json").version;
+            const pkg = require("./package.json").version;
+            const conf = require("./src-tauri/tauri.conf.json").version;
+            const cargo = (fs.readFileSync("./src-tauri/Cargo.toml", "utf8")
+              .match(/\[package\][\s\S]*?\nversion = "([^"]+)"/) || [])[1];
+            const bad = [["package.json", pkg], ["tauri.conf.json", conf], ["Cargo.toml", cargo]]
+              .filter(([, v]) => v !== want);
+            if (bad.length) {
+              console.error(`::error::version mismatch vs release.json ${want}: ` + JSON.stringify(bad)
+                + " — run `pnpm release <bump>` to sync the files.");
+              process.exit(1);
+            }
+            console.log(`versions consistent at ${want}`);
+          '
+
+          # Idempotency: only cut if this version is not already tagged.
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists — nothing to release."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "En Tu Cara $TAG"
+          git push origin "$TAG"
+
+          echo "release=true" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          {
+            echo "body<<__NOTES__"
+            node -p "require('./release.json').notes || ''"
+            echo "__NOTES__"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: gate
+    if: ${{ needs.gate.outputs.release == 'true' }}
+    uses: ./.github/workflows/release.yml
+    with:
+      tag: ${{ needs.gate.outputs.tag }}
+      body: ${{ needs.gate.outputs.body }}
+    secrets: inherit

@@ -1,13 +1,27 @@
 name: Release
 
-# Triggered by `pnpm release <patch|minor|major>`, which pushes a vX.Y.Z tag.
 # Builds the universal macOS bundle, signs the updater artifacts, and publishes
 # a GitHub Release with the .dmg + the latest.json the in-app updater reads.
-# See docs/RELEASING.md.
+# See docs/RELEASING.md. Two entry points:
+#   • workflow_call from cut-release.yml — the normal flow, when a release.json
+#     version change lands on main. (A tag pushed by GITHUB_TOKEN does NOT
+#     re-trigger workflows, so cut-release invokes this directly.)
+#   • push of a vX.Y.Z tag — manual escape hatch (tag a commit by hand).
 on:
   push:
     tags:
       - "v*"
+  workflow_call:
+    inputs:
+      tag:
+        description: "Tag to build (set when invoked by cut-release.yml)."
+        required: true
+        type: string
+      body:
+        description: "Release notes body (from release.json notes)."
+        required: false
+        type: string
+        default: ""
 
 # Let tauri-action create the release and upload assets.
 permissions:
@@ -18,6 +32,8 @@ jobs:
     runs-on: macos-14 # Apple Silicon runner; builds the universal binary.
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
 
       - uses: pnpm/action-setup@v4
 
@@ -53,9 +69,9 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: "En Tu Cara ${{ github.ref_name }}"
-          releaseBody: "Download the .dmg below. Installed copies self-update automatically."
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: "En Tu Cara ${{ inputs.tag || github.ref_name }}"
+          releaseBody: ${{ inputs.body != '' && inputs.body || 'Download the .dmg below. Installed copies self-update automatically.' }}
           releaseDraft: false
           prerelease: false
           args: --target universal-apple-darwin
