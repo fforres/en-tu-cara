@@ -86,6 +86,13 @@ pub fn open_settings_at(app: AppHandle, section: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
+/// Menu-bar title beside the icon ("🔥 ENGINE… · 23m"). None clears it.
+pub fn set_tray_title(app: &AppHandle, title: Option<String>) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_title(title);
+    }
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit En Tu Cara", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit])?;

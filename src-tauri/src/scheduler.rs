@@ -199,6 +199,8 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
             return env_events;
         }
     }
+    // Nudge the OS sync daemon, then read (PLAN freshness; user req: ≤1 min cadence).
+    crate::calendar::refresh_sources();
     // EventKit fetch: 1 day back (ongoing events started earlier) + 1 forward.
     crate::calendar::fetch_events(1, 1)
         .unwrap_or_default()
@@ -282,6 +284,38 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         });
     }
 
+    // Menu-bar next-event title (user req): "Title… · 12m". Cleared when disabled
+    // or nothing upcoming in the fetch window.
+    let title = if settings.show_next_event_in_menu_bar {
+        events
+            .iter()
+            .filter(|e| !e.all_day && e.status != "canceled" && e.start > now)
+            .min_by_key(|e| e.start)
+            .map(|e| {
+                let mins = (e.start - now).num_minutes();
+                let when = if mins >= 60 {
+                    format!("{}h{:02}m", mins / 60, mins % 60)
+                } else {
+                    format!("{}m", mins.max(1))
+                };
+                let max = settings.menu_bar_title_chars.max(4) as usize;
+                let t: String = if e.title.chars().count() > max {
+                    let mut s: String = e.title.chars().take(max - 1).collect();
+                    s.push('…');
+                    s
+                } else {
+                    e.title.clone()
+                };
+                format!("{t} · {when}")
+            })
+    } else {
+        None
+    };
+    {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || crate::tray::set_tray_title(&handle, title));
+    }
+
     // Wall-clock arming: wake at the next due alarm (capped) or the poll backstop.
     let alarms = state.alarms.lock().unwrap();
     match next_due(&events, now, &alarms, &cfg) {
@@ -315,6 +349,30 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         } else {
             std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
         }
+        }
+    });
+}
+
+/// Theme/sound preview (settings ▸ Appearance ▸ Show Demo Alert): fire the real
+/// overlay + sound loop with a fake meeting. Dismiss works like any alarm.
+#[tauri::command]
+pub fn demo_alert(app: tauri::AppHandle) {
+    let now = crate::testmode::clock::now();
+    let payload = serde_json::json!({
+        "occurrence_key": "(demo @ now)",
+        "kind": "t_minus5",
+        "title": "Hello, I'm a demo event",
+        "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
+        "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
+    });
+    ACTIVE_ALARMS.lock().unwrap().push(payload.clone());
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        match crate::overlay::show_overlays(&handle) {
+            Ok(_) => {
+                let _ = handle.emit("alarm-fired", &payload);
+            }
+            Err(e) => eprintln!("demo overlay failed: {e}"),
         }
     });
 }

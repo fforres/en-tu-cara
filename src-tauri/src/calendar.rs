@@ -189,6 +189,23 @@ mod tests {
     }
 }
 
+/// Ask the system to refresh calendar sources (Google/iCloud/Exchange sync pull).
+/// Called once per poll cycle. NOTE the honest physics: this nudges the macOS
+/// sync daemon, but the actual server-fetch cadence for CalDAV accounts is the
+/// per-account "Refresh Calendars" interval (Calendar.app ▸ Settings ▸ Accounts;
+/// minimum "Every minute" is NOT offered — 5 min is the floor, 15 the default).
+/// Documented in README + settings description.
+pub fn refresh_sources() {
+    use objc2::rc::Retained;
+    use objc2_event_kit::EKEventStore;
+    // EKEventStore is !Send — but this is only ever called from the scheduler
+    // thread, so a thread-local cached instance is both safe and cheap.
+    thread_local! {
+        static STORE: Retained<EKEventStore> = unsafe { EKEventStore::new() };
+    }
+    STORE.with(|store| unsafe { store.refreshSourcesIfNecessary() });
+}
+
 /// Cheap video-link presence check for the alarm policy (only_video_events).
 /// The TS extractor (meeting-links.ts) remains canonical for display/Join.
 pub fn has_meeting_link(url: Option<&str>, location: Option<&str>, notes: Option<&str>) -> bool {

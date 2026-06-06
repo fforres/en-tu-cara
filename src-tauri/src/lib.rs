@@ -45,6 +45,7 @@ pub fn run() {
             overlay::close_overlays,
             scheduler::inject_events,
             scheduler::get_active_alarms,
+            scheduler::demo_alert,
             scheduler::snooze_alarm,
             scheduler::dismiss_alarms,
             scheduler::set_paused,

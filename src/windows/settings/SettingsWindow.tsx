@@ -14,6 +14,7 @@ import {
   type Settings,
 } from "./registry";
 import { searchSettings } from "./fuzzy";
+import { THEMES } from "../overlay/themes";
 
 interface CalendarInfo {
   id: string;
@@ -227,6 +228,30 @@ function ControlView({
             </span>
           )}
         </div>
+      );
+    }
+    case "theme": {
+      return (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+          <select
+            aria-label={def.label}
+            value={settings.theme}
+            onChange={(e) => update({ theme: e.target.value })}
+            style={{ font: "inherit", padding: "3px 6px", minWidth: 140 }}
+          >
+            {THEMES.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.label}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={() => void invoke("demo_alert")}
+            style={{ font: "inherit", padding: "3px 12px", cursor: "pointer" }}
+          >
+            Show Demo Alert
+          </button>
+        </span>
       );
     }
     case "placeholder": {

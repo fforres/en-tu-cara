@@ -34,6 +34,12 @@ pub struct Settings {
     pub auto_close_enabled: bool,
     pub auto_close_minutes: u32,
     pub launch_at_login: bool,
+    /// Show the next meeting's title + countdown beside the menu-bar icon.
+    pub show_next_event_in_menu_bar: bool,
+    /// Truncate the menu-bar title to this many characters.
+    pub menu_bar_title_chars: u32,
+    /// Overlay theme id (themes.ts is the registry; unknown ids fall back).
+    pub theme: String,
 }
 
 impl Default for Settings {
@@ -51,6 +57,9 @@ impl Default for Settings {
             auto_close_enabled: false,
             auto_close_minutes: 15,
             launch_at_login: true,
+            show_next_event_in_menu_bar: true,
+            menu_bar_title_chars: 20,
+            theme: "frost-dark".into(),
         }
     }
 }

@@ -29,6 +29,9 @@ tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e
 # EventKit safe wrapper. Pinned exact: 5-star single-maintainer crate (PLAN risk register);
 # CP1a proves occurrence expansion + RSVP fields or we switch to objc2-event-kit.
 eventkit-rs = "=0.5.6"
+# Direct dep ONLY for EKEventStore::refreshSourcesIfNecessary (eventkit-rs doesn't
+# expose it) — nudges macOS to pull fresh data from Google/iCloud each poll.
+objc2-event-kit = { version = "0.3", features = ["EKEventStore"] }
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"

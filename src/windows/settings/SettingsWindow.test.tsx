@@ -20,6 +20,9 @@ const DEFAULTS: Settings = {
   auto_close_enabled: false,
   auto_close_minutes: 15,
   launch_at_login: true,
+  show_next_event_in_menu_bar: true,
+  menu_bar_title_chars: 20,
+  theme: "frost-dark",
 };
 
 const CALENDARS = [
@@ -154,10 +157,28 @@ describe("SettingsWindow", () => {
     });
   });
 
-  it("placeholder settings render their note instead of a control", async () => {
+  it("appearance: theme picker persists and demo button fires demo_alert", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Appearance" }));
-    expect(screen.getByText(/Coming soon — frosted glass/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Alert theme"), { target: { value: "sunset" } });
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "set_settings");
+      expect(call![1].settings.theme).toBe("sunset");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Show Demo Alert" }));
+    await waitFor(() => {
+      expect(invokeMock).toHaveBeenCalledWith("demo_alert");
+    });
+  });
+
+  it("menu bar: next-event toggle persists", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Menu Bar" }));
+    fireEvent.click(screen.getByRole("switch", { name: "Show next event in the menu bar" }));
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "set_settings");
+      expect(call![1].settings.show_next_event_in_menu_bar).toBe(false);
+    });
   });
 
   it("garbage search shows the empty state", async () => {

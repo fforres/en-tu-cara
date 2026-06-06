@@ -35,6 +35,9 @@ export interface Settings {
   auto_close_enabled: boolean;
   auto_close_minutes: number;
   launch_at_login: boolean;
+  show_next_event_in_menu_bar: boolean;
+  menu_bar_title_chars: number;
+  theme: string;
 }
 
 export type Control =
@@ -43,6 +46,7 @@ export type Control =
   | { kind: "sound" } // sound picker + preview (alert_sound)
   | { kind: "snooze-list" } // snooze_minutes editor
   | { kind: "calendar-list" } // enabled_calendar_ids editor
+  | { kind: "theme" } // theme picker + demo alert button
   | { kind: "placeholder"; note: string }; // documented not-yet feature
 
 export interface SettingDef {
@@ -150,17 +154,37 @@ export const REGISTRY: SettingDef[] = [
     section: "menu-bar",
     label: "Show next event in the menu bar",
     description: "Display the next meeting's title and countdown beside the icon.",
-    keywords: ["title", "countdown", "status bar"],
-    control: { kind: "placeholder", note: "Coming soon" },
+    keywords: ["title", "countdown", "status bar", "next event"],
+    control: { kind: "toggle", key: "show_next_event_in_menu_bar" },
+  },
+  {
+    id: "menubar.title-length",
+    section: "menu-bar",
+    label: "Title length",
+    description: "Truncate the menu-bar event title to this many characters.",
+    keywords: ["truncate", "short", "characters", "width"],
+    control: { kind: "number", key: "menu_bar_title_chars", min: 4, max: 60, unit: "chars" },
   },
   // ── Appearance ─────────────────────────────────────────────────────────
   {
-    id: "appearance.themes",
+    id: "appearance.theme",
     section: "appearance",
-    label: "Alert themes",
-    description: "Customize alert colors, blur, and background.",
-    keywords: ["theme", "color", "frost", "blur", "dark", "light"],
-    control: { kind: "placeholder", note: "Coming soon — frosted glass is the current default" },
+    label: "Alert theme",
+    description:
+      "Visual style for the takeover alert. Use Show Demo Alert to see and hear it on your real displays.",
+    keywords: [
+      "theme",
+      "color",
+      "frost",
+      "blur",
+      "dark",
+      "light",
+      "sunset",
+      "terminal",
+      "preview",
+      "demo",
+    ],
+    control: { kind: "theme" },
   },
   // ── Advanced ───────────────────────────────────────────────────────────
   {
