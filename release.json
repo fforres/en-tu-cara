@@ -1,5 +1,5 @@
 {
   "_comment": "Single source of truth for the app version. Bump with `pnpm release <patch|minor|major>` (it propagates to package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml). Merging a version CHANGE here to main is what cuts a GitHub release — ordinary merges do nothing. See docs/RELEASING.md.",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "notes": "En Tu Cara 0.2.0 — unmissable, fully-local meeting alerts for the macOS menu bar (Apple Silicon).\n\n- Tray icon now opens a standard macOS menu (Open Settings · Quit) on left- or right-click; Settings opens as a normal, resizable window that no longer flashes white and matches your light/dark mode.\n- Self-update: installed copies update automatically and show a notification when they do.\n- Tray icon is configurable (Settings → Menu Bar → Tray icon: Auto / Light / Dark).\n- Logs + a shared config folder at ~/.config/skyward/en-tu-cara (logs/, exports/).\n\nAd-hoc signed for now: on first launch right-click → Open (or System Settings → Privacy & Security → Open Anyway) until notarization is set up."
 }
