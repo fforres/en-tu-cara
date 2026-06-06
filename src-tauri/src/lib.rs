@@ -88,6 +88,13 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 
+            // Launch at login, default-on (PLAN Phase 6). Skipped in test mode so
+            // e2e runs don't register the dev binary as a login item.
+            if !testmode::is_test_mode() {
+                use tauri_plugin_autostart::ManagerExt as _;
+                let _ = app.autolaunch().enable();
+            }
+
             Ok(())
         })
         .run(tauri::generate_context!())
