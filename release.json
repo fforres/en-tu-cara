@@ -1,5 +1,5 @@
 {
   "_comment": "Single source of truth for the app version. Bump with `pnpm release <patch|minor|major>` (it propagates to package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml). Merging a version CHANGE here to main is what cuts a GitHub release — ordinary merges do nothing. See docs/RELEASING.md.",
   "version": "0.1.0",
-  "notes": ""
+  "notes": "First release of En Tu Cara — unmissable, fully-local meeting alerts for the macOS menu bar. Download the .dmg below; installed copies self-update automatically."
 }

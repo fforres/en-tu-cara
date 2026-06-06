@@ -3,8 +3,9 @@ name: Cut Release
 # Manifest-driven releasing. A release is cut ONLY when the version in
 # release.json changes on main — ordinary merges (that don't touch release.json)
 # never trigger this, and the version number is whatever YOU wrote in the file
-# (CI never guesses it). The tag-exists guard makes re-runs idempotent.
-# See docs/RELEASING.md.
+# (CI never guesses it). The release-exists guard makes re-runs idempotent yet
+# recoverable: a failed build leaves no published release, so a retry re-points
+# the tag and rebuilds. See docs/RELEASING.md.
 on:
   push:
     branches: [main]
@@ -25,11 +26,13 @@ jobs:
       tag: ${{ steps.gate.outputs.tag }}
       body: ${{ steps.gate.outputs.body }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0 # need tags for the idempotency check
 
       - id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           VERSION=$(node -p "require('./release.json').version")
@@ -54,17 +57,19 @@ jobs:
             console.log(`versions consistent at ${want}`);
           '
 
-          # Idempotency: only cut if this version is not already tagged.
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists — nothing to release."
+          # Idempotency, but recoverable: skip only if a RELEASE is already
+          # published. A failed build can leave an orphaned tag (no release), so
+          # on retry we re-point the tag at this commit and rebuild.
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already published — nothing to do."
             echo "release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" -m "En Tu Cara $TAG"
-          git push origin "$TAG"
+          git tag -fa "$TAG" -m "En Tu Cara $TAG"
+          git push -f origin "$TAG"
 
           echo "release=true" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
