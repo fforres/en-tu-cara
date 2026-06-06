@@ -69,6 +69,8 @@ pub fn run() {
             scheduler::set_paused,
             scheduler::get_paused,
             tray::open_settings,
+            tray::maybe_show_onboarding,
+            tray::finish_onboarding,
             settings::get_settings,
             settings::set_settings,
             settings::preview_sound,

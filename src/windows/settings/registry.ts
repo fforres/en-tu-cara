@@ -39,6 +39,8 @@ export interface Settings {
   theme: string;
   /** Menu-bar tray icon style: "auto" (template, adapts to light/dark) | "light" | "dark". */
   tray_icon: string;
+  /** First-run onboarding completed (not a user-facing setting; gates onboarding). */
+  onboarded: boolean;
 }
 
 export type Control =
