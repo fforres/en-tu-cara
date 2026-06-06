@@ -34,7 +34,7 @@ function countdownLabel(payload: AlarmPayload, now: Date): string {
 
 // Identical on EVERY display, active or not — system colors (Canvas) resolve
 // per-window appearance and made each monitor a different shade (CP1b-human #2).
-const BACKDROP = "rgba(22, 22, 26, 0.55)";
+const BACKDROP = "rgba(22, 22, 26, 0.25)"; // light tint — native HudWindow blur underneath does the frosting
 const CARD_BG = "rgba(30, 30, 34, 0.92)";
 const TEXT = "rgba(255, 255, 255, 0.95)";
 

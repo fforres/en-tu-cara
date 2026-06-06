@@ -16,20 +16,25 @@ fail() { printf '  \033[31m✗ %s\033[0m\n' "$1"; pkill -f "En Tu Cara" 2>/dev/n
 
 [[ -d "$APP" ]] || fail "packaged app missing — run: pnpm tauri build"
 [[ -x "$WINLIST" ]] || bash scripts/checkpoints/cp1b-auto.sh >/dev/null 2>&1 || true
-rm -f "$DATA/fire-log.jsonl" "$DATA/state.json"
+rm -f "$DATA/fire-log.jsonl" "$DATA/state.json" "$DATA/overlay-state.json" "$DATA/overlay-log.jsonl"
 pkill -f "En Tu Cara" 2>/dev/null || true; sleep 1
 
 echo "== CP3-auto: alarm lifecycle (event starts T+15s) =="
-ENTUCARA_TEST_MODE=1 \
+ENTUCARA_TEST_MODE=1 ENTUCARA_SILENT=1 \
 ENTUCARA_TEST_EVENTS='[{"key":"(e2e @ now)","title":"E2E Test Meeting","start_in":15,"duration":60,"my_rsvp":"accepted"},{"key":"(declined @ now)","title":"Declined","start_in":15,"duration":60,"my_rsvp":"declined"}]' \
 "$APP/Contents/MacOS/en-tu-cara" >/tmp/cp3.log 2>&1 &
 
-STATE="$DATA/overlay-state.json"
-sleep 8  # first tick fires T-5 (inside lead window) and spawns the overlay
+LOGF="$DATA/overlay-log.jsonl"
+sleep 10  # first tick (after 2s startup grace) fires T-5 and spawns the overlay
 SCREENS=$("$WINLIST" | sed -E 's/screens=([0-9]+).*/\1/')
-PANELS=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo 0)
+PANELS=$(python3 -c "
+import json
+mx = 0
+for line in open('$LOGF'):
+    mx = max(mx, len(json.loads(line)['overlays']))
+print(mx)" 2>/dev/null || echo 0)
 [[ "$PANELS" == "$SCREENS" && "$PANELS" -ge 1 ]] \
-  && pass "overlay up on T-5 ($PANELS/$SCREENS displays, via overlay-state)" \
+  && pass "overlay up on T-5 ($PANELS/$SCREENS displays, via overlay history)" \
   || fail "overlay missing at T-5: $PANELS/$SCREENS"
 
 sleep 17  # past T+15 start → T-0 must have fired

@@ -40,6 +40,21 @@ fn write_overlay_state(labels: &[String]) {
             dir.join("overlay-state.json"),
             serde_json::json!({ "overlays": labels }).to_string(),
         );
+        // Append-only history: checkers assert "N panels WERE shown" tolerant of
+        // the human at the keyboard dismissing test overlays early (observed
+        // 2026-06-05: ~3 s reaction time, perfectly reasonable, broke 4 runs).
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("overlay-log.jsonl"))
+        {
+            use std::io::Write;
+            let _ = writeln!(
+                f,
+                "{}",
+                serde_json::json!({ "at": chrono::Utc::now().to_rfc3339(), "overlays": labels })
+            );
+        }
     }
 }
 
@@ -95,12 +110,19 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .inner_size(size.width, size.height)
         .decorations(false)
         .resizable(false)
-        // Semi-transparent takeover: the webview is transparent and the UI paints
-        // a translucent tint over whatever is behind (CP1b-human request). TRUE
-        // gaussian blur is DEFERRED to themes work: both Tauri's .effects() config
-        // and a hand-inserted NSVisualEffectView destroy the panel window ~2 s
-        // after webview load (bisected twice, 2026-06-05) — needs upstream digging.
+        // Frosted glass: transparent webview over a native NSVisualEffectView.
+        // (The earlier "effects destroys the panel" diagnosis was FALSE — it
+        // trusted CGWindowList, which silently stops listing transparent windows
+        // once content loads. Ground truth is overlay-state.json + human eyes.)
+        // state: Active forces the SAME material on every display regardless of
+        // which panel is key — fixes the active/inactive darkness mismatch.
         .transparent(true)
+        .effects(tauri::utils::config::WindowEffectsConfig {
+            effects: vec![tauri::utils::WindowEffect::HudWindow],
+            state: Some(tauri::utils::WindowEffectState::Active),
+            radius: None,
+            color: None,
+        })
         .visible(false) // shown via panel.order_front_regardless below
         .build()?;
 

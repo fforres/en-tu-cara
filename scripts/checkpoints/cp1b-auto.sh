@@ -45,18 +45,23 @@ echo "== CP1b-auto: overlay panel assertions =="
 # NOTE: transparent panel windows VANISH from CGWindowList after content load
 # (verified 2026-06-05) — ground truth is the app's test-mode overlay-state.json;
 # winlist output is informational only.
-rm -f "$STATE"; pkill -f "En Tu Cara" 2>/dev/null || true; sleep 1
-ENTUCARA_TEST_MODE=1 ENTUCARA_SPIKE_OVERLAY=2 "$APP/Contents/MacOS/en-tu-cara" >/tmp/entucara-spike.log 2>&1 &
-sleep 7
+LOGF="$HOME/Library/Application Support/dev.fforres.entucara/overlay-log.jsonl"
+rm -f "$STATE" "$LOGF"; pkill -f "En Tu Cara" 2>/dev/null || true; sleep 1
+ENTUCARA_TEST_MODE=1 ENTUCARA_SILENT=1 ENTUCARA_SPIKE_OVERLAY=2 "$APP/Contents/MacOS/en-tu-cara" >/tmp/entucara-spike.log 2>&1 &
+sleep 10  # effects-window creation takes ~4-5s after the spike triggers
 SCREENS=$("$WINLIST" | sed -E 's/screens=([0-9]+).*/\1/')
-PANELS=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo 0)
-echo "  (winlist informational: $("$WINLIST"))"
-sleep 9  # let spike self-dismiss
-DISMISSED=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo "?")
+sleep 9  # let spike self-dismiss (or the human — both fine)
 pkill -f "En Tu Cara" 2>/dev/null || true
+PANELS=$(python3 -c "
+import json
+mx = 0
+for line in open('$LOGF'):
+    mx = max(mx, len(json.loads(line)['overlays']))
+print(mx)" 2>/dev/null || echo 0)
+DISMISSED=$(python3 -c "import json; print(len(json.load(open('$STATE'))['overlays']))" 2>/dev/null || echo "?")
 
 grep -q "SPIKE_OVERLAY shown" /tmp/entucara-spike.log && pass "spike fired ($(grep 'shown' /tmp/entucara-spike.log))" || fail "spike never fired"
-[[ "$PANELS" == "$SCREENS" && "$PANELS" -ge 1 ]] && pass "one panel per display ($PANELS/$SCREENS, via overlay-state)" \
+[[ "$PANELS" == "$SCREENS" && "$PANELS" -ge 1 ]] && pass "one panel per display ($PANELS/$SCREENS, via overlay history)" \
   || fail "panel/display mismatch: $PANELS panels for $SCREENS screens"
 [[ "$DISMISSED" == "0" ]] && pass "panels dismissed cleanly" || fail "$DISMISSED panel(s) leaked after dismiss"
 

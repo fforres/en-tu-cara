@@ -277,7 +277,13 @@ fn tick(app: &tauri::AppHandle) -> u64 {
 /// Holds the latencyCritical assertion only while an alarm is ≤120 s out (PLAN §1).
 pub fn spawn_loop(app: &tauri::AppHandle) {
     let app = app.clone();
-    std::thread::spawn(move || loop {
+    std::thread::spawn(move || {
+        // Startup grace: creating overlay windows (transparent + effects) while
+        // Tauri setup is still settling aborts the app with a foreign ObjC
+        // exception (CP3 regression, 2026-06-05). An alarm app gains nothing
+        // from firing in the first 2 s of its life.
+        std::thread::sleep(Duration::from_secs(2));
+        loop {
         let sleep_secs = tick(&app);
 
         // Windowed precision assertion: close-in alarms get latencyCritical.
@@ -289,6 +295,7 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
             std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
         } else {
             std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
+        }
         }
     });
 }

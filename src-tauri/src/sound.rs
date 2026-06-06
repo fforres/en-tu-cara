@@ -27,6 +27,10 @@ pub fn play(name: &str) {
 /// Start the repeating alert sound. Idempotent — a second call while already
 /// alerting does nothing (T-0 firing while the T-5 overlay is still up).
 pub fn start_alert_loop(app: &tauri::AppHandle) {
+    // Checkpoint scripts run dozens of overlay cycles — spare the human's ears.
+    if std::env::var("ENTUCARA_SILENT").is_ok_and(|v| v == "1") {
+        return;
+    }
     if ALERTING.swap(true, Ordering::SeqCst) {
         return; // already looping
     }
