@@ -1,6 +1,6 @@
 [package]
 name = "en-tu-cara"
-version = "0.2.0"
+version = "0.3.0"
 description = "Unmissable meeting alerts for macOS. Fully local."
 authors = ["fforres"]
 edition = "2021"
