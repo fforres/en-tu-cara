@@ -3,5 +3,5 @@
   "identifier": "updater",
   "description": "Self-update: check GitHub releases, download + install, relaunch.",
   "windows": ["*"],
-  "permissions": ["updater:default", "process:default"]
+  "permissions": ["updater:default", "process:default", "notification:default", "store:default"]
 }

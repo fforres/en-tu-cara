@@ -41,3 +41,5 @@ objc2-app-kit = "0.3"
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Native notification on self-update (so a deploy is visibly confirmed).
+tauri-plugin-notification = "2"
