@@ -23,6 +23,7 @@ const DEFAULTS: Settings = {
   show_next_event_in_menu_bar: true,
   menu_bar_title_chars: 20,
   theme: "frost-dark",
+  tray_icon: "auto",
 };
 
 const CALENDARS = [

@@ -1,5 +1,10 @@
 // Tray popover (Phase 4) — styling deliberately RAW macOS: system-ui font,
 // CSS system colors, color-scheme aware. No custom chrome.
+//
+// DORMANT: the tray icon now opens a native menu (Open Settings · Quit) instead
+// of this popover — see src-tauri/src/tray.rs. This component is no longer
+// rendered by App.tsx (kept, with its test, for possible reuse). Do NOT wire it
+// to the hidden `background` window: that window must render nothing.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";

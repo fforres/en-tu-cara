@@ -38,11 +38,8 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // Second launch → just surface the popover of the running instance.
-            if let Some(win) = app.get_webview_window("tray-popover") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            // Second launch → open settings on the already-running instance.
+            let _ = tray::open_settings(app.clone());
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_nspanel::init())
@@ -143,7 +140,11 @@ pub fn run() {
             // en-tu-cara), not ~/Library — no existing users to migrate (PROGRESS).
             let data_dir = paths::data_dir();
             app.manage(state::SharedState::load(data_dir.clone()));
-            app.manage(settings::SettingsStore::load(data_dir));
+            let settings_store = settings::SettingsStore::load(data_dir);
+            // Apply the saved tray-icon style now that settings are loaded (the
+            // tray was built with the template default in tray::setup above).
+            tray::apply_tray_icon(app.handle(), &settings_store.get().tray_icon);
+            app.manage(settings_store);
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 

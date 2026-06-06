@@ -1,8 +1,8 @@
 //! User settings: typed, persisted, live-applied (PLAN Phase 7).
 //!
-//! Flat JSON at app_data_dir/settings.json. Unknown fields are ignored and
-//! missing fields take defaults (serde defaults) — old/new app versions can
-//! share the file in both directions.
+//! Flat JSON at <Skyward data dir>/settings.json (see paths.rs). Unknown fields
+//! are ignored and missing fields take defaults (serde defaults) — old/new app
+//! versions can share the file in both directions.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -40,6 +40,8 @@ pub struct Settings {
     pub menu_bar_title_chars: u32,
     /// Overlay theme id (themes.ts is the registry; unknown ids fall back).
     pub theme: String,
+    /// Menu-bar tray icon style: "auto" (template, adapts) | "light" | "dark".
+    pub tray_icon: String,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             show_next_event_in_menu_bar: true,
             menu_bar_title_chars: 20,
             theme: "frost-dark".into(),
+            tray_icon: "auto".into(),
         }
     }
 }
@@ -128,6 +131,11 @@ pub fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), Str
             return Err(format!("autostart: {e}"));
         }
     }
+
+    // Live-apply: swap the menu-bar icon style immediately (no restart).
+    if previous.tray_icon != settings.tray_icon {
+        crate::tray::apply_tray_icon(&app, &settings.tray_icon);
+    }
     Ok(())
 }
 
@@ -177,6 +185,7 @@ mod tests {
         assert!(!s.auto_close_enabled, "auto-close defaults OFF (PLAN §1)");
         assert!(s.alert_tentative && s.alert_pending);
         assert!(s.enabled_calendar_ids.is_none(), "all calendars by default");
+        assert_eq!(s.tray_icon, "auto", "tray icon defaults to the adaptive template");
     }
 
     #[test]

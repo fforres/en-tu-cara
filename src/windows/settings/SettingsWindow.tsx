@@ -143,6 +143,23 @@ function ControlView({
         </span>
       );
     }
+    case "select": {
+      const value = String(settings[control.key]);
+      return (
+        <select
+          aria-label={def.label}
+          value={value}
+          onChange={(e) => update({ [control.key]: e.target.value })}
+          style={{ font: "inherit", padding: "3px 6px", minWidth: 140 }}
+        >
+          {control.options.map((o) => (
+            <option key={o.value} value={o.value}>
+              {o.label}
+            </option>
+          ))}
+        </select>
+      );
+    }
     case "snooze-list": {
       return (
         <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
