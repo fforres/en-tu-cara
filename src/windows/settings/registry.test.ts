@@ -61,6 +61,20 @@ describe("registry integrity", () => {
       expect(tray!.control.options.map((o) => o.value)).toEqual(["auto", "light", "dark"]);
     }
   });
+
+  it("the About section links to the repo + new-issue page and has a version control", () => {
+    expect(REGISTRY.filter((s) => s.section === "about").length).toBeGreaterThanOrEqual(3);
+    const source = REGISTRY.find((s) => s.id === "about.source");
+    expect(source?.control.kind).toBe("link");
+    if (source?.control.kind === "link") {
+      expect(source.control.url).toBe("https://github.com/fforres/en-tu-cara");
+    }
+    const support = REGISTRY.find((s) => s.id === "about.support");
+    if (support?.control.kind === "link") {
+      expect(support.control.url).toContain("/issues/new");
+    }
+    expect(REGISTRY.find((s) => s.id === "about.version")?.control.kind).toBe("version");
+  });
 });
 
 describe("fuzzyMatch", () => {

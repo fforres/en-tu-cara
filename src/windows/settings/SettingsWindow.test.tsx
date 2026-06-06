@@ -169,6 +169,18 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("About tab shows Check for Updates and opens the issue tracker via open_url", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "About" }));
+    expect(await screen.findByRole("button", { name: "Check for Updates" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Report an issue" }));
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "open_url");
+      expect(call).toBeDefined();
+      expect((call![1] as { url: string }).url).toContain("/issues/new");
+    });
+  });
+
   it("changing lead minutes clamps to range and persists", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Alerts" }));

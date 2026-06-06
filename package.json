@@ -2,6 +2,7 @@
   "name": "en-tu-cara",
   "version": "0.3.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@11.3.0",
   "scripts": {

@@ -112,6 +112,15 @@ pub fn finish_onboarding(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Open an external URL in the default browser (About / Help & Support tab).
+#[tauri::command]
+pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Menu-bar title beside the icon ("🔥 ENGINE… · 23m"). None clears it.
 pub fn set_tray_title(app: &AppHandle, title: Option<String>) {
     if let Some(tray) = app.tray_by_id("main") {

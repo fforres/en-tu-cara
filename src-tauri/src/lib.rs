@@ -71,6 +71,7 @@ pub fn run() {
             tray::open_settings,
             tray::maybe_show_onboarding,
             tray::finish_onboarding,
+            tray::open_url,
             settings::get_settings,
             settings::set_settings,
             settings::preview_sound,
