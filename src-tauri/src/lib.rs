@@ -5,6 +5,8 @@
 mod calendar;
 #[cfg(target_os = "macos")]
 mod overlay;
+#[cfg(target_os = "macos")]
+mod scheduler;
 mod testmode;
 mod tray;
 
@@ -61,6 +63,10 @@ pub fn run() {
             // CP1b spike: ENTUCARA_SPIKE_OVERLAY=<secs> → timed takeover test.
             #[cfg(target_os = "macos")]
             overlay::maybe_run_spike(app.handle());
+
+            // CP1d spike: ENTUCARA_SPIKE_FIRE="<secs>,<arm>" → fire-latency test.
+            #[cfg(target_os = "macos")]
+            scheduler::maybe_run_fire_spike(app.handle());
 
             Ok(())
         })
