@@ -264,14 +264,9 @@ export function TrayPopover() {
             {paused ? "▶️" : "⏸️"}
           </button>
           <button
-            title="Settings (coming soon)"
-            style={{
-              border: "none",
-              background: "none",
-              cursor: "default",
-              fontSize: 14,
-              opacity: 0.4,
-            }}
+            title="Settings"
+            onClick={() => void invoke("open_settings")}
+            style={{ border: "none", background: "none", cursor: "pointer", fontSize: 14 }}
           >
             ⚙️
           </button>

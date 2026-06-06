@@ -35,6 +35,56 @@ tauri_panel! {
 }
 
 const POPOVER_LABEL: &str = "tray-popover";
+const SETTINGS_LABEL: &str = "settings";
+
+/// Open (or focus) the settings window — a NORMAL decorated window. The app is
+/// an Accessory, so we temporarily need nothing special: the window can become
+/// key when clicked; set_focus brings it forward.
+#[tauri::command]
+pub fn open_settings(app: AppHandle) -> Result<(), String> {
+    open_settings_at(app, None)
+}
+
+pub fn open_settings_at(app: AppHandle, section: Option<&str>) -> Result<(), String> {
+    if let Some(existing) = app.get_webview_window(SETTINGS_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let url = match section {
+        Some(s) => format!("index.html?window=settings&section={s}"),
+        None => "index.html?window=settings".to_string(),
+    };
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        SETTINGS_LABEL,
+        tauri::WebviewUrl::App(url.into()),
+    )
+    .title("En Tu Cara Settings")
+    .inner_size(780.0, 540.0)
+    .min_inner_size(640.0, 400.0)
+    .build()
+    .map_err(|e| e.to_string())?;
+    let _ = window.show();
+    let _ = window.set_focus();
+    // Accessory apps don't activate on window creation — without this the
+    // settings window stays ordered-out (observed: onscreen=false).
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::NSApplication;
+        use objc2_foundation::MainThreadMarker;
+        if let Some(mtm) = MainThreadMarker::new() {
+            #[allow(deprecated)]
+            NSApplication::sharedApplication(mtm).activateIgnoringOtherApps(true);
+        }
+    }
+    // Hide the popover panel — the gear click came from there.
+    #[cfg(target_os = "macos")]
+    if let Ok(panel) = app.get_webview_panel(POPOVER_LABEL) {
+        panel.hide();
+    }
+    Ok(())
+}
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit En Tu Cara", true, None::<&str>)?;

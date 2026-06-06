@@ -49,6 +49,7 @@ pub fn run() {
             scheduler::dismiss_alarms,
             scheduler::set_paused,
             scheduler::get_paused,
+            tray::open_settings,
             settings::get_settings,
             settings::set_settings,
             settings::preview_sound,
@@ -83,6 +84,28 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::maybe_run_fire_spike(app.handle());
 
+            // Visual checks / dev convenience: open the settings window on launch
+            // (after the 2s setup-grace — window creation during setup is the
+            // known abort trap).
+            if let Ok(section_env) = std::env::var("ENTUCARA_OPEN_SETTINGS") {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                    let h = handle.clone();
+                    let section = (section_env != "1").then_some(section_env);
+                    let dispatched = handle.run_on_main_thread(move || {
+                        eprintln!("OPEN_SETTINGS: invoking");
+                        match tray::open_settings_at(h, section.as_deref()) {
+                            Ok(()) => eprintln!("OPEN_SETTINGS: ok"),
+                            Err(e) => eprintln!("OPEN_SETTINGS: ERR {e}"),
+                        }
+                    });
+                    if dispatched.is_err() {
+                        eprintln!("OPEN_SETTINGS: main-thread dispatch failed");
+                    }
+                });
+            }
+
             // Real-calendar e2e: ENTUCARA_SPIKE_REAL_E2E="<start_in_secs>".
             #[cfg(target_os = "macos")]
             calendar::maybe_run_real_e2e();
@@ -107,6 +130,19 @@ pub fn run() {
             }
 
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            // Settings closed → back to dock-less Accessory (see open_settings).
+            #[cfg(target_os = "macos")]
+            if window.label() == "settings" {
+                if let tauri::WindowEvent::CloseRequested { .. } = event {
+                    let _ = window
+                        .app_handle()
+                        .set_activation_policy(tauri::ActivationPolicy::Accessory);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (window, event);
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
