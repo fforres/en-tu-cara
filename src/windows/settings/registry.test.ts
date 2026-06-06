@@ -38,6 +38,29 @@ describe("registry integrity", () => {
       expect(s.keywords.length).toBeGreaterThan(0);
     }
   });
+
+  it("select controls have at least two options with non-empty values", () => {
+    for (const s of REGISTRY) {
+      if (s.control.kind === "select") {
+        expect(s.control.options.length).toBeGreaterThanOrEqual(2);
+        for (const o of s.control.options) {
+          expect(o.value.length).toBeGreaterThan(0);
+          expect(o.label.length).toBeGreaterThan(0);
+        }
+      }
+    }
+  });
+
+  it("the tray-icon setting is a select with auto/light/dark in the menu-bar section", () => {
+    const tray = REGISTRY.find((s) => s.id === "menubar.tray-icon");
+    expect(tray).toBeDefined();
+    expect(tray!.section).toBe("menu-bar");
+    expect(tray!.control.kind).toBe("select");
+    if (tray!.control.kind === "select") {
+      expect(tray!.control.key).toBe("tray_icon");
+      expect(tray!.control.options.map((o) => o.value)).toEqual(["auto", "light", "dark"]);
+    }
+  });
 });
 
 describe("fuzzyMatch", () => {

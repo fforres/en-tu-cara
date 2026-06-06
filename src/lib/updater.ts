@@ -20,6 +20,7 @@ import {
   sendNotification,
 } from "@tauri-apps/plugin-notification";
 import { load } from "@tauri-apps/plugin-store";
+import { updatedNotice } from "./update-notice";
 
 // Persisted in app_data_dir (survives the .app swap, unlike anything in-bundle).
 const STORE_FILE = "update-state.json";
@@ -54,8 +55,9 @@ export async function notifyIfUpdated(): Promise<void> {
     await ensureNotificationPermission();
     const store = await load(STORE_FILE, { autoSave: true, defaults: {} });
     const last = await store.get<string>(LAST_VERSION_KEY);
-    if (last && last !== current) {
-      await notify("En Tu Cara updated", `Now running v${current} (was v${last}).`);
+    const notice = updatedNotice(last, current);
+    if (notice) {
+      await notify(notice.title, notice.body);
     }
     await store.set(LAST_VERSION_KEY, current);
   } catch (error) {

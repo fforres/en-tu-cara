@@ -48,7 +48,10 @@ jobs:
             const conf = require("./src-tauri/tauri.conf.json").version;
             const cargo = (fs.readFileSync("./src-tauri/Cargo.toml", "utf8")
               .match(/\[package\][\s\S]*?\nversion = "([^"]+)"/) || [])[1];
-            const bad = [["package.json", pkg], ["tauri.conf.json", conf], ["Cargo.toml", cargo]]
+            const lock = (fs.readFileSync("./src-tauri/Cargo.lock", "utf8")
+              .match(/name = "en-tu-cara"\nversion = "([^"]+)"/) || [])[1];
+            const bad = [["package.json", pkg], ["tauri.conf.json", conf],
+              ["Cargo.toml", cargo], ["Cargo.lock", lock]]
               .filter(([, v]) => v !== want);
             if (bad.length) {
               console.error(`::error::version mismatch vs release.json ${want}: ` + JSON.stringify(bad)
@@ -75,9 +78,11 @@ jobs:
           {
             echo "release=true"
             echo "tag=$TAG"
-            echo "body<<__NOTES__"
+            # Unlikely-to-collide heredoc delimiter (notes are author-controlled,
+            # but a fixed common token like EOF could appear in release notes).
+            echo "body<<__ETC_RELEASE_NOTES_EOF__"
             node -p "require('./release.json').notes || ''"
-            echo "__NOTES__"
+            echo "__ETC_RELEASE_NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
 
   build:

@@ -1,7 +1,8 @@
 name: Release
 
-# Builds the universal macOS bundle, signs the updater artifacts, and publishes
-# a GitHub Release with the .dmg + the latest.json the in-app updater reads.
+# Builds the Apple Silicon (aarch64) macOS bundle, signs the updater artifacts,
+# and publishes a GitHub Release with the .dmg + the latest.json the in-app
+# updater reads. (Intel is intentionally not shipped — see the build args.)
 # See docs/RELEASING.md. Two entry points:
 #   • workflow_call from cut-release.yml — the normal flow, when a release.json
 #     version change lands on main. (A tag pushed by GITHUB_TOKEN does NOT
@@ -29,7 +30,7 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-14 # Apple Silicon runner; builds the universal binary.
+    runs-on: macos-14 # Apple Silicon runner; builds the aarch64 binary.
     steps:
       - uses: actions/checkout@v6
         with:

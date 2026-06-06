@@ -38,11 +38,8 @@ pub fn run() {
                 .build(),
         )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
-            // Second launch → just surface the popover of the running instance.
-            if let Some(win) = app.get_webview_window("tray-popover") {
-                let _ = win.show();
-                let _ = win.set_focus();
-            }
+            // Second launch → open settings on the already-running instance.
+            let _ = tray::open_settings(app.clone());
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_nspanel::init())
