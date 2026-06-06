@@ -43,7 +43,9 @@ const css = {
 } as const;
 
 function cssColor(c: CalendarInfo["color"]): string {
-  if (!c) return "GrayText";
+  if (!c) {
+    return "GrayText";
+  }
   const [r, g, b, a] = c;
   return `rgba(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)}, ${a})`;
 }
@@ -148,7 +150,15 @@ function EventRow({ event, now, ongoing }: { event: UiEvent; now: Date; ongoing?
         )}
       </div>
       {ongoing && (
-        <span style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 11, color: css.secondary }}>
+        <span
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 4,
+            fontSize: 11,
+            color: css.secondary,
+          }}
+        >
           <Pie fraction={elapsedFraction(event, now)} />
           {remainingLabel(event, now)}
         </span>
@@ -183,10 +193,10 @@ export function TrayPopover() {
   }, []);
 
   useEffect(() => {
-    refresh();
-    const data = setInterval(refresh, 30_000); // poll backstop (PLAN §1)
+    void refresh();
+    const data = setInterval(() => void refresh(), 30_000); // poll backstop (PLAN §1)
     const clock = setInterval(() => setNow(new Date()), 15_000);
-    const onFocus = () => refresh(); // popover shown → instant freshness
+    const onFocus = () => void refresh(); // popover shown → instant freshness
     window.addEventListener("focus", onFocus);
     return () => {
       clearInterval(data);
@@ -255,7 +265,13 @@ export function TrayPopover() {
           </button>
           <button
             title="Settings (coming soon)"
-            style={{ border: "none", background: "none", cursor: "default", fontSize: 14, opacity: 0.4 }}
+            style={{
+              border: "none",
+              background: "none",
+              cursor: "default",
+              fontSize: 14,
+              opacity: 0.4,
+            }}
           >
             ⚙️
           </button>
@@ -274,16 +290,21 @@ export function TrayPopover() {
           Alerts are paused
         </div>
       )}
-      {error && (
-        <div style={{ padding: "6px 12px", fontSize: 11, color: "crimson" }}>{error}</div>
-      )}
+      {error && <div style={{ padding: "6px 12px", fontSize: 11, color: "crimson" }}>{error}</div>}
 
       <div style={{ flex: 1, overflowY: "auto" }}>
         {ongoing.length > 0 && (
           <>
             {sectionHeader("Ongoing events")}
             {ongoing.map((e) => (
-              <div key={e.occurrence_key} style={{ ["--cal-color" as string]: cssColor(calendars.get(e.calendar_id ?? "")?.color ?? null) }}>
+              <div
+                key={e.occurrence_key}
+                style={{
+                  ["--cal-color" as string]: cssColor(
+                    calendars.get(e.calendar_id ?? "")?.color ?? null,
+                  ),
+                }}
+              >
                 <EventRow event={e} now={now} ongoing />
               </div>
             ))}
@@ -329,7 +350,14 @@ export function TrayPopover() {
           <section key={g.dateKey}>
             <div style={{ padding: "6px 12px 2px", fontWeight: 600, fontSize: 12 }}>{g.label}</div>
             {g.events.map((e) => (
-              <div key={e.occurrence_key} style={{ ["--cal-color" as string]: cssColor(calendars.get(e.calendar_id ?? "")?.color ?? null) }}>
+              <div
+                key={e.occurrence_key}
+                style={{
+                  ["--cal-color" as string]: cssColor(
+                    calendars.get(e.calendar_id ?? "")?.color ?? null,
+                  ),
+                }}
+              >
                 <EventRow event={e} now={now} />
               </div>
             ))}

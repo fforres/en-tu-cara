@@ -79,15 +79,11 @@ describe("extractMeetingLink — adversarial cases", () => {
   });
 
   it("plain-prose URL-less event → null", () => {
-    expect(
-      extractMeetingLink({ notes: "Lunch with Marta", location: "Café Pinares" }),
-    ).toBeNull();
+    expect(extractMeetingLink({ notes: "Lunch with Marta", location: "Café Pinares" })).toBeNull();
   });
 
   it("non-meeting URL in notes → null (no false positives on docs links)", () => {
-    expect(
-      extractMeetingLink({ notes: "Doc: https://docs.google.com/document/d/abc" }),
-    ).toBeNull();
+    expect(extractMeetingLink({ notes: "Doc: https://docs.google.com/document/d/abc" })).toBeNull();
   });
 
   it("teams.live.com consumer links", () => {

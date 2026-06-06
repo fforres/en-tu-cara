@@ -1,0 +1,22 @@
+# Git hooks, managed by Lefthook (https://github.com/evilmartians/lefthook).
+# Installed via the `prepare` script on `pnpm install`, or `pnpm lefthook install`.
+pre-commit:
+  # Sequential: oxfmt rewrites staged files (and re-stages them) before oxlint reads them.
+  parallel: false
+  commands:
+    oxfmt:
+      priority: 1
+      glob: "*.{js,jsx,ts,tsx}"
+      # src-tauri/ is Rust; never run JS tooling there.
+      exclude:
+        - "src-tauri/**"
+      run: pnpm exec oxfmt {staged_files}
+      stage_fixed: true
+    oxlint:
+      priority: 2
+      glob: "*.{js,jsx,ts,tsx}"
+      exclude:
+        - "src-tauri/**"
+      # Type-aware (tsgolint) via `typeAware: true` in .oxlintrc.json — needs
+      # the `oxlint-tsgolint` devDep (re-run `pnpm install` if linting looks lax).
+      run: pnpm exec oxlint {staged_files}

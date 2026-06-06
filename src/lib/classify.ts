@@ -18,7 +18,7 @@ export function classify(event: ClassifiableEvent, now: Date): Bucket {
   const start = new Date(event.start);
   const end = new Date(event.end);
   // Zero-duration events count as ongoing for the instant of their start.
-  if (now >= start && (now < end || +start === +end && +now === +start)) {
+  if (now >= start && (now < end || (+start === +end && +now === +start))) {
     return "ongoing";
   }
   return now < start ? "upcoming" : "past";
@@ -27,20 +27,22 @@ export function classify(event: ClassifiableEvent, now: Date): Bucket {
 /** "51m remaining" / "1h 05m remaining" — the ongoing-row caption. */
 export function remainingLabel(event: ClassifiableEvent, now: Date): string {
   const ms = new Date(event.end).getTime() - now.getTime();
-  if (ms <= 0) return "ended";
+  if (ms <= 0) {
+    return "ended";
+  }
   const totalMin = Math.ceil(ms / 60_000);
   const h = Math.floor(totalMin / 60);
   const m = totalMin % 60;
-  return h > 0
-    ? `${h}h ${String(m).padStart(2, "0")}m remaining`
-    : `${m}m remaining`;
+  return h > 0 ? `${h}h ${String(m).padStart(2, "0")}m remaining` : `${m}m remaining`;
 }
 
 /** Fraction of the event elapsed, clamped 0..1 — drives the pie countdown. */
 export function elapsedFraction(event: ClassifiableEvent, now: Date): number {
   const start = new Date(event.start).getTime();
   const end = new Date(event.end).getTime();
-  if (end <= start) return 1;
+  if (end <= start) {
+    return 1;
+  }
   return Math.min(1, Math.max(0, (now.getTime() - start) / (end - start)));
 }
 
@@ -82,7 +84,9 @@ export function groupUpcomingByDay<E extends ClassifiableEvent>(
   for (const e of upcoming) {
     const start = new Date(e.start);
     const key = localDateKey(start);
-    if (todayOnly && key !== todayKey) continue;
+    if (todayOnly && key !== todayKey) {
+      continue;
+    }
     if (!groups.has(key)) {
       const label =
         key === todayKey
@@ -98,10 +102,7 @@ export function groupUpcomingByDay<E extends ClassifiableEvent>(
 }
 
 /** Ongoing events sorted by soonest-ending first (tray top section). */
-export function ongoingSorted<E extends ClassifiableEvent>(
-  events: E[],
-  now: Date,
-): E[] {
+export function ongoingSorted<E extends ClassifiableEvent>(events: E[], now: Date): E[] {
   return events
     .filter((e) => classify(e, now) === "ongoing")
     .sort((a, b) => +new Date(a.end) - +new Date(b.end));

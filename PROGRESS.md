@@ -4,11 +4,13 @@
 > Schema: phase / last_passed_auto / human_gates / needs_human / decisions.
 
 ## phase
+
 MVP CORE COMPLETE (Phases 0-5 auto-tiers all passed 2026-06-05). Remaining: human
 gates (1b fullscreen, popover visual), 1a-freshness probe, packaging polish (Phase 6),
 settings (Phase 7), hardening (Phase 8).
 
 ## last_passed_auto
+
 - CP0 (2026-06-05) — full ladder incl. bundle + launch assertions
 - CP1a (2026-06-05) — EventKit in-bundle: permission persisted across relaunch AND
   rebuild (ad-hoc signing OK so far); occurrence expansion PROVEN (17 series);
@@ -28,17 +30,19 @@ settings (Phase 7), hardening (Phase 8).
   RAM: 76 MB idle / 88 MB with 3 overlay panels (main process RSS)
 
 ## human_gates
-| gate | last passed | macOS build | notes |
-|---|---|---|---|
-| CP1a (permission + iPhone event) | — | — | |
-| CP1b (overlay over fullscreen, 2 displays) | — | — | |
-| CP1c (popover positioning, 2 display configs) | — | — | |
-| CP3 (real event T-5/T-0) | — | — | |
-| CP4 (tray visual parity) | — | — | |
-| CP5 (Join real browser / sound audible / redaction) | — | — | |
-| CP6 (3-day dogfood) | — | — | |
+
+| gate                                                | last passed | macOS build | notes |
+| --------------------------------------------------- | ----------- | ----------- | ----- |
+| CP1a (permission + iPhone event)                    | —           | —           |       |
+| CP1b (overlay over fullscreen, 2 displays)          | —           | —           |       |
+| CP1c (popover positioning, 2 display configs)       | —           | —           |       |
+| CP3 (real event T-5/T-0)                            | —           | —           |       |
+| CP4 (tray visual parity)                            | —           | —           |       |
+| CP5 (Join real browser / sound audible / redaction) | —           | —           |       |
+| CP6 (3-day dogfood)                                 | —           | —           |       |
 
 ## needs_human
+
 1. **CP1b-human** (~3 min): above-fullscreen overlay test — protocol in
    `scripts/checkpoints/cp1b-human.md`. (Felipe already eyeballed the desktop case
    live on 2026-06-05 — "this shows the overlay" — fullscreen case remains.)
@@ -49,6 +53,7 @@ settings (Phase 7), hardening (Phase 8).
    interactive-session checks).
 
 ## decisions
+
 - 2026-06-05 — Stack: Tauri v2, local-only EventKit (see report Decision Record).
 - 2026-06-05 — No Developer ID cert on this machine (`security find-identity` → 0). Using
   stable ad-hoc signing. RISK: TCC permission may not persist across REBUILDS with ad-hoc
@@ -65,13 +70,14 @@ settings (Phase 7), hardening (Phase 8).
   first. occurrence_key collisions across calendars are a FEATURE for alarm dedup.
 - 2026-06-05 — OVERLAY BUG CAUGHT BY SPIKE: NSPanel hidesOnDeactivate defaults YES →
   panels vanished ~2 s after show in an Accessory app. Fixed: set_hides_on_deactivate(false)
-  + window.show() to sync Tauri's visible-state (else re-asserted on webview load).
+  - window.show() to sync Tauri's visible-state (else re-asserted on webview load).
 - 2026-06-05 — screencapture CANNOT see layer-1000 windows. Overlay verification =
   CGWindowList assertions (scripts/bin/winlist, swiftc one-shot). PLAN's
   "screencapture non-blank" idea replaced; CP5 visual checks should use
   CGWindowListCreateImage per window id instead.
 
 ## known limitations / parked
+
 - The 7 settings reference PNGs were lost in a scaffolding accident (2026-06-05);
   `reference-images/SETTINGS-REFERENCE.md` is the substitute. Felipe to re-screenshot
   In Your Face's settings when convenient.

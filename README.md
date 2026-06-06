@@ -7,12 +7,12 @@ meeting start.
 
 **Stack:** Tauri v2 · React + TypeScript (Vite) · Rust. macOS 14+.
 
-| Doc | What's in it |
-|---|---|
-| `PLAN.md` | Phased build plan, checkpoints, risk register |
-| `PROGRESS.md` | Current state, passed checkpoints, NEEDS-HUMAN queue, decision log |
-| `framework-research-report.md` | Why Tauri + EventKit (decision record) |
-| `reference-images/` | Tray + settings UI references |
+| Doc                            | What's in it                                                       |
+| ------------------------------ | ------------------------------------------------------------------ |
+| `PLAN.md`                      | Phased build plan, checkpoints, risk register                      |
+| `PROGRESS.md`                  | Current state, passed checkpoints, NEEDS-HUMAN queue, decision log |
+| `framework-research-report.md` | Why Tauri + EventKit (decision record)                             |
+| `reference-images/`            | Tray + settings UI references                                      |
 
 ## Prerequisites
 
@@ -37,14 +37,14 @@ pnpm tauri dev
 
 ### Useful env vars (spikes / debugging)
 
-| Var | Effect |
-|---|---|
-| `ENTUCARA_TEST_MODE=1` | Enables test IPC (mock clock, injected events) + writes fire log to `~/Library/Application Support/dev.fforres.entucara/fire-log.jsonl` |
-| `ENTUCARA_TEST_EVENTS='[{"key":"x","title":"T","start_in":15,"duration":60}]'` | Replace EventKit with synthetic events (seconds relative to launch); needs TEST_MODE |
-| `ENTUCARA_SPIKE_OVERLAY=8` | Show the takeover on all displays after 8 s, self-dismiss after 12 s |
-| `ENTUCARA_SPIKE_FIRE="300,latencycritical"` | Fire-latency measurement (arm: `none` \| `userinitiated` \| `latencycritical`) → `fire-spike.jsonl` |
-| `ENTUCARA_SPIKE_REAL_E2E=70` | Create a REAL calendar event 70 s out, let the full pipeline fire, then auto-delete it |
-| `ENTUCARA_SPIKE_DUMP=1` | Dump calendars + ±7 days of events to `spike-dump.json` and keep running |
+| Var                                                                            | Effect                                                                                                                                  |
+| ------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `ENTUCARA_TEST_MODE=1`                                                         | Enables test IPC (mock clock, injected events) + writes fire log to `~/Library/Application Support/dev.fforres.entucara/fire-log.jsonl` |
+| `ENTUCARA_TEST_EVENTS='[{"key":"x","title":"T","start_in":15,"duration":60}]'` | Replace EventKit with synthetic events (seconds relative to launch); needs TEST_MODE                                                    |
+| `ENTUCARA_SPIKE_OVERLAY=8`                                                     | Show the takeover on all displays after 8 s, self-dismiss after 12 s                                                                    |
+| `ENTUCARA_SPIKE_FIRE="300,latencycritical"`                                    | Fire-latency measurement (arm: `none` \| `userinitiated` \| `latencycritical`) → `fire-spike.jsonl`                                     |
+| `ENTUCARA_SPIKE_REAL_E2E=70`                                                   | Create a REAL calendar event 70 s out, let the full pipeline fire, then auto-delete it                                                  |
+| `ENTUCARA_SPIKE_DUMP=1`                                                        | Dump calendars + ±7 days of events to `spike-dump.json` and keep running                                                                |
 
 ## Test
 
@@ -65,11 +65,12 @@ bash scripts/checkpoints/cp3-auto.sh            # full alarm lifecycle e2e in ~2
 ```
 
 Notes:
+
 - The scripts `pkill` the app — don't run them while you're depending on alerts.
 - Overlay verification uses `scripts/bin/winlist` (CGWindowList) because
   **`screencapture` cannot see ScreenSaver-level windows** — a screenshot will
   look empty even when the takeover is on screen.
-- What *cannot* be auto-verified (needs human eyes, see `scripts/checkpoints/cp1b-human.md`):
+- What _cannot_ be auto-verified (needs human eyes, see `scripts/checkpoints/cp1b-human.md`):
   overlay-above-another-app's-fullscreen, audible sound, popover look/feel.
 
 ### Fast end-to-end against a real calendar
@@ -90,6 +91,7 @@ pnpm tauri build
 ```
 
 Artifacts:
+
 - `src-tauri/target/release/bundle/macos/En Tu Cara.app` (~10 MB)
 - `src-tauri/target/release/bundle/dmg/En Tu Cara_<version>_aarch64.dmg` (~4 MB)
 
@@ -100,6 +102,7 @@ build's code identity. With an Apple Developer cert, set `signingIdentity` under
 installs. Version lives in `src-tauri/tauri.conf.json` → `version`.
 
 Identity notes (don't change casually):
+
 - Bundle id `dev.fforres.entucara` — calendar permission is keyed to it.
 - `tauri-nspanel` is pinned to an exact git rev and `eventkit-rs` to `=0.5.6`
   in `src-tauri/Cargo.toml`; both pins are load-bearing (see PLAN risk register).

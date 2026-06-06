@@ -50,6 +50,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     }
 
     let monitors = app.available_monitors()?;
+    let primary = app.primary_monitor()?.map(|m| m.position().to_owned());
     let mut labels = Vec::new();
 
     for (i, monitor) in monitors.iter().enumerate() {
@@ -59,16 +60,27 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         let pos = monitor.position().to_logical::<f64>(scale);
         let size = monitor.size().to_logical::<f64>(scale);
 
+        // The alert card renders on the PRIMARY display; every other display gets
+        // frosted glass only (CP1b-human feedback) — present but not shouting thrice.
+        let is_primary = primary.as_ref().is_none_or(|p| p == monitor.position());
+        let role = if is_primary { "main" } else { "dim" };
+
         let window = WebviewWindowBuilder::new(
             app,
             &label,
-            WebviewUrl::App("index.html?window=overlay".into()),
+            WebviewUrl::App(format!("index.html?window=overlay&role={role}").into()),
         )
         .title("En Tu Cara Alert")
         .position(pos.x, pos.y)
         .inner_size(size.width, size.height)
         .decorations(false)
         .resizable(false)
+        // Semi-transparent takeover: the webview is transparent and the UI paints
+        // a translucent tint over whatever is behind (CP1b-human request). TRUE
+        // gaussian blur is DEFERRED to themes work: both Tauri's .effects() config
+        // and a hand-inserted NSVisualEffectView destroy the panel window ~2 s
+        // after webview load (bisected twice, 2026-06-05) — needs upstream digging.
+        .transparent(true)
         .visible(false) // shown via panel.order_front_regardless below
         .build()?;
 

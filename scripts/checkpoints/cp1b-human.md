@@ -31,4 +31,5 @@ as Accessory (it is, by default), (2) re-apply level+behavior after `order_front
 (3) escalate per PLAN §2 GO/NO-GO (stack fallback).
 
 ## Re-run cadence
+
 After every macOS update (`sw_vers` drift auto-flags this gate), and at every phase gate.

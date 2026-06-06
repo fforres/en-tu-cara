@@ -125,10 +125,7 @@ describe("groupUpcomingByDay (today|all toggle, day headers)", () => {
 
 describe("ongoingSorted", () => {
   it("soonest-ending first", () => {
-    const events = [
-      ev("ends-1500", at(13, 0), at(15, 0)),
-      ev("ends-1430", at(14, 0), at(14, 30)),
-    ];
+    const events = [ev("ends-1500", at(13, 0), at(15, 0)), ev("ends-1430", at(14, 0), at(14, 30))];
     expect(ongoingSorted(events, NOW).map((e) => e.occurrence_key)).toEqual([
       "ends-1430",
       "ends-1500",

@@ -1,39 +1,45 @@
 {
   "name": "en-tu-cara",
-  "private": true,
   "version": "0.1.0",
+  "private": true,
   "type": "module",
   "scripts": {
+    "prepare": "lefthook install",
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "tsgo --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src",
+    "typecheck": "tsgo --noEmit",
+    "lint": "oxlint src",
+    "format": "oxfmt",
+    "format:check": "oxfmt --check",
+    "check": "oxfmt --check && oxlint src && tsgo --noEmit",
     "checkpoint:0": "bash scripts/checkpoints/cp0-auto.sh"
   },
   "dependencies": {
-    "react": "^19.1.0",
-    "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
     "@tauri-apps/plugin-opener": "^2",
-    "@tauri-apps/plugin-store": "^2"
+    "@tauri-apps/plugin-store": "^2",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@testing-library/jest-dom": "^6.6.0",
+    "@testing-library/react": "^16.3.0",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
+    "@typescript/native-preview": "7.0.0-dev.20260603.1",
     "@vitejs/plugin-react": "^4.6.0",
+    "jsdom": "^26.1.0",
+    "lefthook": "^2.1.9",
+    "oxfmt": "^0.53.0",
+    "oxlint": "^1.68.0",
+    "oxlint-tsgolint": "^0.23.0",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "@tauri-apps/cli": "^2",
-    "vitest": "^3.2.0",
-    "@testing-library/react": "^16.3.0",
-    "@testing-library/jest-dom": "^6.6.0",
-    "jsdom": "^26.1.0",
-    "eslint": "^9.30.0",
-    "typescript-eslint": "^8.35.0",
-    "@eslint/js": "^9.30.0",
-    "eslint-plugin-react-hooks": "^5.2.0"
+    "vitest": "^3.2.0"
   }
 }

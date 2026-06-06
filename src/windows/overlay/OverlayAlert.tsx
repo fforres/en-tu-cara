@@ -11,16 +11,21 @@ import type { UiEvent } from "../tray/TrayPopover";
 
 interface AlarmPayload {
   occurrence_key: string;
-  kind: "t_minus5" | "t_zero" | "snooze" | string;
+  // `string & {}` keeps the literal hints for autocomplete without collapsing the union to `string`.
+  kind: "t_minus5" | "t_zero" | "snooze" | (string & {});
   title: string;
   start: string | null;
   end: string | null;
 }
 
 function countdownLabel(payload: AlarmPayload, now: Date): string {
-  if (!payload.start) return "";
+  if (!payload.start) {
+    return "";
+  }
   const ms = new Date(payload.start).getTime() - now.getTime();
-  if (ms <= 0) return "started";
+  if (ms <= 0) {
+    return "started";
+  }
   const totalSec = Math.ceil(ms / 1000);
   const m = Math.floor(totalSec / 60);
   const s = totalSec % 60;
@@ -28,6 +33,10 @@ function countdownLabel(payload: AlarmPayload, now: Date): string {
 }
 
 export function OverlayAlert() {
+  // Secondary displays render frosted glass only — the card shows once, on the
+  // primary display (CP1b-human feedback). The native NSVisualEffectView behind
+  // this transparent webview provides the actual blur; we only tint it.
+  const role = new URLSearchParams(window.location.search).get("role") ?? "main";
   const [alarms, setAlarms] = useState<AlarmPayload[]>([]);
   const [events, setEvents] = useState<UiEvent[]>([]);
   const [now, setNow] = useState(() => new Date());
@@ -40,15 +49,24 @@ export function OverlayAlert() {
         const seen = new Set(prev.map((a) => `${a.occurrence_key}#${a.kind}`));
         return [...prev, ...incoming.filter((a) => !seen.has(`${a.occurrence_key}#${a.kind}`))];
       });
-    invoke<AlarmPayload[]>("get_active_alarms").then(dedupAdd).catch(() => {});
+    invoke<AlarmPayload[]>("get_active_alarms")
+      .then(dedupAdd)
+      .catch(() => {});
     const unlistenPromise = listen<AlarmPayload>("alarm-fired", (e) => dedupAdd([e.payload]));
     invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 1 })
       .then(setEvents)
       .catch(() => {});
     const clock = setInterval(() => setNow(new Date()), 1000);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        void invoke("dismiss_alarms");
+      }
+    };
+    window.addEventListener("keydown", onKey);
     return () => {
-      unlistenPromise.then((u) => u());
+      void unlistenPromise.then((u) => u());
       clearInterval(clock);
+      window.removeEventListener("keydown", onKey);
     };
   }, []);
 
@@ -60,14 +78,29 @@ export function OverlayAlert() {
     });
   }, [alarms, events]);
 
+  if (role === "dim") {
+    // Frost-only: the native blur does the work; a light tint + click-to-dismiss.
+    return (
+      <main
+        onClick={() => invoke("dismiss_alarms")}
+        title="Click to dismiss"
+        style={{
+          height: "100%",
+          background: "color-mix(in srgb, Canvas 35%, transparent)",
+          cursor: "pointer",
+        }}
+      />
+    );
+  }
+
   return (
     <main
       style={{
         font: "17px system-ui, -apple-system, sans-serif",
         colorScheme: "light dark",
-        background: "color-mix(in srgb, Canvas 92%, transparent)",
+        background: "color-mix(in srgb, Canvas 40%, transparent)",
         color: "CanvasText",
-        height: "100vh",
+        height: "100%",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
@@ -78,7 +111,28 @@ export function OverlayAlert() {
     >
       <div style={{ fontSize: 64 }}>⏰</div>
 
-      {cards.length === 0 && <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>}
+      {cards.length === 0 && (
+        <>
+          <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>
+          {/* Spike/edge path renders no cards — Dismiss must ALWAYS exist
+              (CP1b-human: "I couldn't close it"). Esc works too. */}
+          <button
+            autoFocus
+            onClick={() => invoke("dismiss_alarms")}
+            style={{
+              font: "inherit",
+              padding: "10px 28px",
+              borderRadius: 8,
+              border: "1px solid color-mix(in srgb, CanvasText 25%, transparent)",
+              background: "color-mix(in srgb, Canvas 60%, transparent)",
+              color: "CanvasText",
+              cursor: "pointer",
+            }}
+          >
+            Dismiss
+          </button>
+        </>
+      )}
 
       {cards.map(({ alarm, link }) => (
         <section
@@ -90,7 +144,7 @@ export function OverlayAlert() {
             gap: 10,
             padding: "24px 40px",
             borderRadius: 14,
-            background: "color-mix(in srgb, CanvasText 6%, transparent)",
+            background: "color-mix(in srgb, Canvas 75%, transparent)",
             maxWidth: 720,
           }}
         >
@@ -115,7 +169,7 @@ export function OverlayAlert() {
                 autoFocus
                 onClick={async () => {
                   await openUrl(link.url);
-                  invoke("dismiss_alarms");
+                  void invoke("dismiss_alarms");
                 }}
                 style={{
                   font: "inherit",
