@@ -85,10 +85,10 @@ export function OverlayAlert() {
   }, [alarms, events]);
 
   if (role === "dim") {
-    // Tint-only companion panel. Deliberately NOT clickable — dismissal happens
-    // only via the explicit buttons on the primary display (user request:
-    // accidental clicks must never kill an alarm).
-    return <main style={{ height: "100%", background: BACKDROP }} />;
+    // Tint-only companion panel. pointer-events none + a window class that can
+    // never become key: clicks neither interact NOR steal focus from the main
+    // alert on the primary display (user request).
+    return <main style={{ height: "100%", background: BACKDROP, pointerEvents: "none" }} />;
   }
 
   return (

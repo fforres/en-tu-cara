@@ -22,7 +22,20 @@ tauri_panel! {
             is_floating_panel: true
         }
     })
+
+    panel!(DimPanel {
+        config: {
+            // Companion frost panels: visible, click-swallowing, but can NEVER
+            // take key status — clicks must not steal focus from the main alert.
+            can_become_key_window: false,
+            is_floating_panel: true
+        }
+    })
 }
+
+/// Label of the panel carrying the alert card (primary display) — re-keyed on
+/// reuse so keyboard focus always lands there.
+static MAIN_OVERLAY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
 
 const OVERLAY_LABEL_PREFIX: &str = "overlay-";
 
@@ -79,6 +92,11 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
                 panel.order_front_regardless();
             }
         }
+        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+            if let Ok(panel) = app.get_webview_panel(main_label) {
+                panel.show_and_make_key();
+            }
+        }
         crate::sound::start_alert_loop(app);
         write_overlay_state(&live);
         return Ok(live);
@@ -126,7 +144,12 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .visible(false) // shown via panel.order_front_regardless below
         .build()?;
 
-        let panel = window.to_panel::<OverlayPanel>()?;
+        let panel = if is_primary {
+            *MAIN_OVERLAY.lock().unwrap() = Some(label.clone());
+            window.to_panel::<OverlayPanel>()?
+        } else {
+            window.to_panel::<DimPanel>()?
+        };
         panel.set_level(PanelLevel::ScreenSaver.value());
         // Nonactivating: takeover draws above everything but never activates the app —
         // focus stays where the user was (they may be mid-keystroke in the meeting).
@@ -150,6 +173,15 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         panel.order_front_regardless();
 
         labels.push(label);
+    }
+
+    // Autofocus the principal display: the main panel takes key status so Esc /
+    // Enter work immediately. Nonactivating style means the APP still doesn't
+    // activate — focus-of-record stays with whatever the user was using.
+    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+        if let Ok(panel) = app.get_webview_panel(main_label) {
+            panel.show_and_make_key();
+        }
     }
 
     // Recurring alert sound: loops while panels are up, stops on close (user req).
