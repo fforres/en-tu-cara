@@ -13,7 +13,21 @@ use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-pub const LEAD_SECS: i64 = 5 * 60; // T-5m, hard-coded for MVP
+/// Alarm policy knobs — sourced from Settings, injected per tick (pure core
+/// stays clock-free AND config-free).
+#[derive(Debug, Clone)]
+pub struct AlarmConfig {
+    pub lead_secs: i64,
+    pub alert_tentative: bool,
+    pub alert_pending: bool,
+    pub only_video_events: bool,
+}
+
+impl Default for AlarmConfig {
+    fn default() -> Self {
+        Self { lead_secs: 5 * 60, alert_tentative: true, alert_pending: true, only_video_events: false }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AlarmEvent {
@@ -26,6 +40,8 @@ pub struct AlarmEvent {
     pub status: String,
     /// accepted | declined | tentative | pending | … (None = no attendees / own event)
     pub my_rsvp: Option<String>,
+    /// Event carries a video-conference link (Rust-side heuristic at ingestion).
+    pub has_link: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
@@ -83,11 +99,19 @@ impl AlarmState {
     }
 }
 
-fn alertable(event: &AlarmEvent) -> bool {
+fn alertable(event: &AlarmEvent, cfg: &AlarmConfig) -> bool {
     if event.all_day || event.status == "canceled" {
         return false;
     }
-    !matches!(event.my_rsvp.as_deref(), Some("declined"))
+    if cfg.only_video_events && !event.has_link {
+        return false;
+    }
+    match event.my_rsvp.as_deref() {
+        Some("declined") => false,
+        Some("tentative") => cfg.alert_tentative,
+        Some("pending") => cfg.alert_pending,
+        _ => true,
+    }
 }
 
 /// THE decision function. Called on every scheduler tick. Mutates nothing —
@@ -96,11 +120,12 @@ pub fn compute_actions(
     events: &[AlarmEvent],
     now: DateTime<Utc>,
     state: &AlarmState,
+    cfg: &AlarmConfig,
 ) -> Vec<FireAction> {
     let mut actions = Vec::new();
 
-    for event in events.iter().filter(|e| alertable(e)) {
-        let t5_due = event.start - Duration::seconds(LEAD_SECS);
+    for event in events.iter().filter(|e| alertable(e, cfg)) {
+        let t5_due = event.start - Duration::seconds(cfg.lead_secs);
 
         // T-5: due, not yet fired, and the MEETING HAS NOT STARTED — once the
         // event is under way a "starts in 5 minutes" alert is a lie; T-0 covers it.
@@ -135,7 +160,7 @@ pub fn compute_actions(
     for (key, until) in &state.snoozes {
         if now >= *until && !state.has_fired(key, AlarmKind::Snooze) {
             if let Some(event) = events.iter().find(|e| &e.occurrence_key == key) {
-                if now < event.end && alertable(event) {
+                if now < event.end && alertable(event, cfg) {
                     actions.push(FireAction {
                         occurrence_key: key.clone(),
                         kind: AlarmKind::Snooze,
@@ -153,16 +178,21 @@ pub fn compute_actions(
 
 /// Next instant the scheduler must wake for (for wall-clock arming + the
 /// windowed latencyCritical assertion). None = nothing pending in `events`.
-pub fn next_due(events: &[AlarmEvent], now: DateTime<Utc>, state: &AlarmState) -> Option<DateTime<Utc>> {
+pub fn next_due(
+    events: &[AlarmEvent],
+    now: DateTime<Utc>,
+    state: &AlarmState,
+    cfg: &AlarmConfig,
+) -> Option<DateTime<Utc>> {
     let mut next: Option<DateTime<Utc>> = None;
     let mut consider = |t: DateTime<Utc>| {
         if t > now && next.is_none_or(|n| t < n) {
             next = Some(t);
         }
     };
-    for e in events.iter().filter(|e| alertable(e)) {
+    for e in events.iter().filter(|e| alertable(e, cfg)) {
         if !state.has_fired(&e.occurrence_key, AlarmKind::TMinus5) {
-            consider(e.start - Duration::seconds(LEAD_SECS));
+            consider(e.start - Duration::seconds(cfg.lead_secs));
         }
         if !state.has_fired(&e.occurrence_key, AlarmKind::TZero) {
             consider(e.start);
@@ -192,7 +222,12 @@ mod tests {
             all_day: false,
             status: "confirmed".into(),
             my_rsvp: Some("accepted".into()),
+            has_link: true,
         }
+    }
+
+    fn cfg() -> AlarmConfig {
+        AlarmConfig::default()
     }
 
     fn kinds(actions: &[FireAction]) -> Vec<(String, AlarmKind)> {
@@ -204,19 +239,19 @@ mod tests {
         let events = vec![ev("m", 600, 1500)]; // starts T+10min
         let mut state = AlarmState::default();
 
-        assert!(compute_actions(&events, t(0), &state).is_empty(), "too early");
+        assert!(compute_actions(&events, t(0), &state, &cfg()).is_empty(), "too early");
 
-        let at_t5 = compute_actions(&events, t(300), &state);
+        let at_t5 = compute_actions(&events, t(300), &state, &cfg());
         assert_eq!(kinds(&at_t5), vec![("m".into(), AlarmKind::TMinus5)]);
         state.mark_fired("m", AlarmKind::TMinus5, t(300));
 
-        assert!(compute_actions(&events, t(400), &state).is_empty(), "T-5 deduped");
+        assert!(compute_actions(&events, t(400), &state, &cfg()).is_empty(), "T-5 deduped");
 
-        let at_t0 = compute_actions(&events, t(600), &state);
+        let at_t0 = compute_actions(&events, t(600), &state, &cfg());
         assert_eq!(kinds(&at_t0), vec![("m".into(), AlarmKind::TZero)]);
         state.mark_fired("m", AlarmKind::TZero, t(600));
 
-        assert!(compute_actions(&events, t(700), &state).is_empty(), "all done");
+        assert!(compute_actions(&events, t(700), &state, &cfg()).is_empty(), "all done");
     }
 
     #[test]
@@ -228,7 +263,7 @@ mod tests {
         let mut allday = ev("allday", 300, 900);
         allday.all_day = true;
         let state = AlarmState::default();
-        assert!(compute_actions(&[declined, canceled, allday], t(600), &state).is_empty());
+        assert!(compute_actions(&[declined, canceled, allday], t(600), &state, &cfg()).is_empty());
     }
 
     #[test]
@@ -237,7 +272,7 @@ mod tests {
         // honest — "starts in 1.5m"), then T-0. If discovered AFTER start: only T-0.
         let events = vec![ev("late", 90, 990)];
         let state = AlarmState::default();
-        let discovered_after_start = compute_actions(&events, t(120), &state);
+        let discovered_after_start = compute_actions(&events, t(120), &state, &cfg());
         assert_eq!(kinds(&discovered_after_start), vec![("late".into(), AlarmKind::TZero)]);
     }
 
@@ -246,7 +281,7 @@ mod tests {
         let events = vec![ev("during", 0, 1800), ev("ended", 0, 300)];
         let state = AlarmState::default();
         // Wake at T+600: "during" still ongoing → T-0 fires; "ended" → silence forever.
-        let actions = compute_actions(&events, t(600), &state);
+        let actions = compute_actions(&events, t(600), &state, &cfg());
         assert_eq!(kinds(&actions), vec![("during".into(), AlarmKind::TZero)]);
     }
 
@@ -254,7 +289,7 @@ mod tests {
     fn t5_suppressed_once_meeting_started() {
         let events = vec![ev("m", 0, 900)];
         let state = AlarmState::default();
-        let actions = compute_actions(&events, t(60), &state);
+        let actions = compute_actions(&events, t(60), &state, &cfg());
         // Only T-0 — a "starts in 5 min" banner after start would lie.
         assert_eq!(kinds(&actions), vec![("m".into(), AlarmKind::TZero)]);
     }
@@ -264,13 +299,13 @@ mod tests {
         let events = vec![ev("m", 0, 900)];
         let mut state = AlarmState::default();
         state.paused = true;
-        let actions = compute_actions(&events, t(10), &state);
+        let actions = compute_actions(&events, t(10), &state, &cfg());
         assert_eq!(actions.len(), 1);
         assert!(actions[0].suppressed);
         // Caller marks fired even when suppressed → un-pause does NOT replay.
         state.mark_fired("m", AlarmKind::TZero, t(10));
         state.paused = false;
-        assert!(compute_actions(&events, t(20), &state).is_empty());
+        assert!(compute_actions(&events, t(20), &state, &cfg()).is_empty());
     }
 
     #[test]
@@ -280,13 +315,13 @@ mod tests {
         state.mark_fired("m", AlarmKind::TZero, t(10));
         state.snooze("m", t(310)); // snooze 5m at T+10
 
-        assert!(compute_actions(&events, t(200), &state).is_empty(), "not due yet");
+        assert!(compute_actions(&events, t(200), &state, &cfg()).is_empty(), "not due yet");
 
         // Simulated restart: state round-trips through serde.
         let state: AlarmState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
 
-        let actions = compute_actions(&events, t(320), &state);
+        let actions = compute_actions(&events, t(320), &state, &cfg());
         assert_eq!(kinds(&actions), vec![("m".into(), AlarmKind::Snooze)]);
     }
 
@@ -295,14 +330,14 @@ mod tests {
         let events = vec![ev("m", 0, 300)];
         let mut state = AlarmState::default();
         state.snooze("m", t(600)); // due after the meeting ended
-        assert!(compute_actions(&events, t(700), &state).is_empty());
+        assert!(compute_actions(&events, t(700), &state, &cfg()).is_empty());
     }
 
     #[test]
     fn two_events_same_start_both_fire() {
         let events = vec![ev("a", 300, 1200), ev("b", 300, 900)];
         let state = AlarmState::default();
-        let actions = compute_actions(&events, t(300), &state);
+        let actions = compute_actions(&events, t(300), &state, &cfg());
         assert_eq!(actions.len(), 2, "one overlay, two cards — but two fire actions");
     }
 
@@ -317,7 +352,7 @@ mod tests {
             occurrence_key: "(id @ new)".into(),
             ..ev("ignored", 3600, 5400)
         }];
-        let actions = compute_actions(&moved, t(3600 - 300), &state);
+        let actions = compute_actions(&moved, t(3600 - 300), &state, &cfg());
         assert_eq!(kinds(&actions), vec![("(id @ new)".into(), AlarmKind::TMinus5)]);
     }
 
@@ -325,9 +360,47 @@ mod tests {
     fn next_due_picks_earliest_unfired() {
         let events = vec![ev("a", 600, 1200), ev("b", 900, 1500)];
         let mut state = AlarmState::default();
-        assert_eq!(next_due(&events, t(0), &state), Some(t(300))); // a's T-5
+        assert_eq!(next_due(&events, t(0), &state, &cfg()), Some(t(300))); // a's T-5
         state.mark_fired("a", AlarmKind::TMinus5, t(300));
-        assert_eq!(next_due(&events, t(301), &state), Some(t(600))); // a's T-0
+        assert_eq!(next_due(&events, t(301), &state, &cfg()), Some(t(600))); // a's T-0
+    }
+
+    #[test]
+    fn config_lead_minutes_changes_t5_timing() {
+        let events = vec![ev("m", 600, 1500)];
+        let state = AlarmState::default();
+        let one_min = AlarmConfig { lead_secs: 60, ..AlarmConfig::default() };
+        assert!(compute_actions(&events, t(300), &state, &one_min).is_empty(), "5min lead disabled");
+        let at_t1 = compute_actions(&events, t(540), &state, &one_min);
+        assert_eq!(kinds(&at_t1), vec![("m".into(), AlarmKind::TMinus5)]);
+        assert_eq!(next_due(&events, t(0), &state, &one_min), Some(t(540)));
+    }
+
+    #[test]
+    fn config_tentative_and_pending_policies() {
+        let mut tentative = ev("tent", 300, 900);
+        tentative.my_rsvp = Some("tentative".into());
+        let mut pending = ev("pend", 300, 900);
+        pending.my_rsvp = Some("pending".into());
+        let events = vec![tentative, pending];
+        let state = AlarmState::default();
+
+        let both_off = AlarmConfig { alert_tentative: false, alert_pending: false, ..AlarmConfig::default() };
+        assert!(compute_actions(&events, t(400), &state, &both_off).is_empty());
+
+        let defaults = cfg();
+        assert_eq!(compute_actions(&events, t(400), &state, &defaults).len(), 2);
+    }
+
+    #[test]
+    fn config_only_video_events() {
+        let mut no_link = ev("nolink", 300, 900);
+        no_link.has_link = false;
+        let with_link = ev("link", 300, 900);
+        let only_video = AlarmConfig { only_video_events: true, ..AlarmConfig::default() };
+        let state = AlarmState::default();
+        let actions = compute_actions(&[no_link, with_link], t(400), &state, &only_video);
+        assert_eq!(kinds(&actions), vec![("link".into(), AlarmKind::TZero)]);
     }
 
     #[test]

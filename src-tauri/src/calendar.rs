@@ -189,6 +189,21 @@ mod tests {
     }
 }
 
+/// Cheap video-link presence check for the alarm policy (only_video_events).
+/// The TS extractor (meeting-links.ts) remains canonical for display/Join.
+pub fn has_meeting_link(url: Option<&str>, location: Option<&str>, notes: Option<&str>) -> bool {
+    const HOSTS: [&str; 10] = [
+        "zoom.us", "zoomgov.com", "meet.google.com", "teams.microsoft.com",
+        "teams.live.com", "webex.com", "meet.jit.si", "whereby.com", "around.co",
+        "discord.gg",
+    ];
+    [url, location, notes].iter().flatten().any(|field| {
+        HOSTS.iter().any(|h| field.contains(h))
+            || field.contains("https://meet.")
+            || field.contains("https://call.")
+    })
+}
+
 #[tauri::command]
 pub fn calendar_authorization_status() -> String {
     format!("{:?}", EventsManager::authorization_status())

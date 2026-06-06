@@ -145,6 +145,7 @@ pub fn inject_events(events: Vec<InjectableEvent>) -> Result<usize, String> {
                 all_day: e.all_day,
                 status: e.status,
                 my_rsvp: e.my_rsvp,
+                has_link: true,
             })
         })
         .collect();
@@ -180,6 +181,7 @@ fn env_test_events() -> Option<Vec<AlarmEvent>> {
                             all_day: false,
                             status: s["status"].as_str().unwrap_or("confirmed").to_string(),
                             my_rsvp: s["my_rsvp"].as_str().map(String::from),
+                            has_link: s["has_link"].as_bool().unwrap_or(true),
                         }
                     })
                     .collect(),
@@ -188,7 +190,7 @@ fn env_test_events() -> Option<Vec<AlarmEvent>> {
         .clone()
 }
 
-fn upcoming_alarm_events() -> Vec<AlarmEvent> {
+fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent> {
     if let Some(injected) = INJECTED_EVENTS.lock().unwrap().clone() {
         return injected;
     }
@@ -201,10 +203,20 @@ fn upcoming_alarm_events() -> Vec<AlarmEvent> {
     crate::calendar::fetch_events(1, 1)
         .unwrap_or_default()
         .into_iter()
+        .filter(|e| match (&settings.enabled_calendar_ids, &e.calendar_id) {
+            (Some(enabled), Some(cal)) => enabled.contains(cal),
+            (Some(_), None) => true, // no calendar id — never silently drop
+            (None, _) => true,
+        })
         .filter_map(|e| {
             Some(AlarmEvent {
                 start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
                 end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
+                has_link: crate::calendar::has_meeting_link(
+                    e.url.as_deref(),
+                    e.location.as_deref(),
+                    e.notes.as_deref(),
+                ),
                 occurrence_key: e.occurrence_key,
                 title: e.title,
                 all_day: e.all_day,
@@ -218,12 +230,19 @@ fn upcoming_alarm_events() -> Vec<AlarmEvent> {
 /// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
 fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
-    let events = upcoming_alarm_events();
+    let settings = app.state::<crate::settings::SettingsStore>().get();
+    let cfg = crate::alarm_core::AlarmConfig {
+        lead_secs: i64::from(settings.lead_minutes) * 60,
+        alert_tentative: settings.alert_tentative,
+        alert_pending: settings.alert_pending,
+        only_video_events: settings.only_video_events,
+    };
+    let events = upcoming_alarm_events(&settings);
     let state = app.state::<SharedState>();
 
     let actions = {
         let alarms = state.alarms.lock().unwrap();
-        compute_actions(&events, now, &alarms)
+        compute_actions(&events, now, &alarms, &cfg)
     };
 
     for action in &actions {
@@ -265,7 +284,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
 
     // Wall-clock arming: wake at the next due alarm (capped) or the poll backstop.
     let alarms = state.alarms.lock().unwrap();
-    match next_due(&events, now, &alarms) {
+    match next_due(&events, now, &alarms, &cfg) {
         Some(due) => ((due - now).num_seconds().clamp(1, 30)) as u64,
         None => 30,
     }

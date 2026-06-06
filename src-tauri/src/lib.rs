@@ -8,6 +8,7 @@ mod calendar;
 mod overlay;
 #[cfg(target_os = "macos")]
 mod scheduler;
+mod settings;
 #[cfg(target_os = "macos")]
 mod sound;
 mod state;
@@ -48,6 +49,10 @@ pub fn run() {
             scheduler::dismiss_alarms,
             scheduler::set_paused,
             scheduler::get_paused,
+            settings::get_settings,
+            settings::set_settings,
+            settings::preview_sound,
+            settings::list_system_sounds,
         ])
         .setup(|app| {
             // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
@@ -82,17 +87,23 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             calendar::maybe_run_real_e2e();
 
-            // Persisted alarm state + the production scheduler loop.
+            // Persisted alarm state + settings + the production scheduler loop.
             let data_dir = app.path().app_data_dir()?;
-            app.manage(state::SharedState::load(data_dir));
+            app.manage(state::SharedState::load(data_dir.clone()));
+            app.manage(settings::SettingsStore::load(data_dir));
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 
-            // Launch at login, default-on (PLAN Phase 6). Skipped in test mode so
+            // Launch at login per settings (default on). Skipped in test mode so
             // e2e runs don't register the dev binary as a login item.
             if !testmode::is_test_mode() {
                 use tauri_plugin_autostart::ManagerExt as _;
-                let _ = app.autolaunch().enable();
+                let wanted = app.state::<settings::SettingsStore>().get().launch_at_login;
+                let _ = if wanted {
+                    app.autolaunch().enable()
+                } else {
+                    app.autolaunch().disable()
+                };
             }
 
             Ok(())

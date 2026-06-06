@@ -11,8 +11,6 @@ use objc2_app_kit::NSSound;
 use objc2_foundation::NSString;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-pub const DEFAULT_ALERT_SOUND: &str = "Sosumi";
-const REPEAT_EVERY_SECS: u64 = 4;
 
 static ALERTING: AtomicBool = AtomicBool::new(false);
 
@@ -36,9 +34,13 @@ pub fn start_alert_loop(app: &tauri::AppHandle) {
     }
     let app = app.clone();
     std::thread::spawn(move || {
+        use tauri::Manager as _;
         while ALERTING.load(Ordering::SeqCst) {
-            let _ = app.run_on_main_thread(|| play(DEFAULT_ALERT_SOUND));
-            std::thread::sleep(std::time::Duration::from_secs(REPEAT_EVERY_SECS));
+            // Read per-iteration: sound/interval changes live-apply mid-alarm.
+            let settings = app.state::<crate::settings::SettingsStore>().get();
+            let name = settings.alert_sound.clone();
+            let _ = app.run_on_main_thread(move || play(&name));
+            std::thread::sleep(std::time::Duration::from_secs(settings.sound_repeat_secs.max(2)));
         }
     });
 }
