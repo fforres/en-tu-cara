@@ -76,6 +76,11 @@ if (dryRun) {
 
 // --- write release.json (source) + the 4 files the build reads ----------
 release.version = next;
+// Clear the previous release's notes so they can't ship verbatim under the new
+// version (v0.3.0 published with 0.2.0's notes this way). Empty notes are safe:
+// release.yml falls back to a generic body. Write fresh notes before merging.
+const hadNotes = Boolean(release.notes);
+release.notes = "";
 writeFileSync(releasePath, JSON.stringify(release, null, 2) + "\n");
 
 const pkg = JSON.parse(readFileSync(pkgPath, "utf8"));
@@ -113,4 +118,9 @@ if (commit) {
 } else {
   console.log(`\x1b[32m✓ bumped to ${next}.\x1b[0m Review the diff, then:`);
   console.log(`  git commit -am "chore(release): ${tag}"   # PR + merge to main → CI cuts ${tag}`);
+}
+if (hadNotes) {
+  console.log(
+    `\x1b[33m⚠ cleared the previous release's notes in release.json — write ${tag}'s notes there before merging (empty notes publish a generic body).\x1b[0m`,
+  );
 }
