@@ -37,6 +37,8 @@ export interface Settings {
   show_next_event_in_menu_bar: boolean;
   menu_bar_title_chars: number;
   theme: string;
+  /** Menu-bar tray icon style: "auto" (template, adapts to light/dark) | "light" | "dark". */
+  tray_icon: string;
 }
 
 export type Control =
@@ -46,6 +48,7 @@ export type Control =
   | { kind: "snooze-list" } // snooze_minutes editor
   | { kind: "calendar-list" } // enabled_calendar_ids editor
   | { kind: "theme" } // theme picker + demo alert button
+  | { kind: "select"; key: keyof Settings; options: Array<{ value: string; label: string }> }
   | { kind: "placeholder"; note: string }; // documented not-yet feature
 
 export interface SettingDef {
@@ -163,6 +166,23 @@ export const REGISTRY: SettingDef[] = [
     description: "Truncate the menu-bar event title to this many characters.",
     keywords: ["truncate", "short", "characters", "width"],
     control: { kind: "number", key: "menu_bar_title_chars", min: 4, max: 60, unit: "chars" },
+  },
+  {
+    id: "menubar.tray-icon",
+    section: "menu-bar",
+    label: "Tray icon",
+    description:
+      "Menu-bar icon style. Auto adapts to the light/dark menu bar; Light and Dark force a fixed glyph.",
+    keywords: ["tray", "icon", "menu bar", "template", "light", "dark", "appearance"],
+    control: {
+      kind: "select",
+      key: "tray_icon",
+      options: [
+        { value: "auto", label: "Auto (adapts)" },
+        { value: "light", label: "Light" },
+        { value: "dark", label: "Dark" },
+      ],
+    },
   },
   // ── Appearance ─────────────────────────────────────────────────────────
   {

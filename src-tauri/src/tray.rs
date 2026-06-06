@@ -94,6 +94,21 @@ pub fn set_tray_title(app: &AppHandle, title: Option<String>) {
     }
 }
 
+/// Swap the menu-bar icon style live (Settings → Menu Bar → Tray icon).
+/// "light"/"dark" force a fixed glyph; anything else ("auto") uses the template
+/// that adapts to the light/dark menu bar. Glyphs are embedded at compile time.
+pub fn apply_tray_icon(app: &AppHandle, style: &str) {
+    let (bytes, template): (&[u8], bool) = match style {
+        "light" => (include_bytes!("../icons/tray-light.png"), false),
+        "dark" => (include_bytes!("../icons/tray-dark.png"), false),
+        _ => (include_bytes!("../icons/tray-auto.png"), true),
+    };
+    if let (Some(tray), Ok(img)) = (app.tray_by_id("main"), Image::from_bytes(bytes)) {
+        let _ = tray.set_icon(Some(img));
+        let _ = tray.set_icon_as_template(template);
+    }
+}
+
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let quit = MenuItem::with_id(app, "quit", "Quit En Tu Cara", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&quit])?;
@@ -101,11 +116,12 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     #[cfg(target_os = "macos")]
     setup_popover_panel(app)?;
 
-    // Dedicated menu-bar glyph (assets/icon-options/tray-template/tray-4-5),
-    // NOT the colorful app icon. Embedded at compile time; template mode renders
-    // it monochrome and adapts to the light/dark menu bar.
+    // Dedicated menu-bar glyph (assets/icon-options tray-4-5), NOT the colorful
+    // app icon. Starts on the template variant; the saved `tray_icon` setting is
+    // applied right after SettingsStore loads (lib.rs), and live on change
+    // (settings.rs) — both via apply_tray_icon below.
     let tray_icon =
-        Image::from_bytes(include_bytes!("../icons/tray.png")).expect("valid tray icon PNG");
+        Image::from_bytes(include_bytes!("../icons/tray-auto.png")).expect("valid tray icon PNG");
 
     TrayIconBuilder::with_id("main")
         .icon(tray_icon)

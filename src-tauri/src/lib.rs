@@ -143,7 +143,11 @@ pub fn run() {
             // en-tu-cara), not ~/Library — no existing users to migrate (PROGRESS).
             let data_dir = paths::data_dir();
             app.manage(state::SharedState::load(data_dir.clone()));
-            app.manage(settings::SettingsStore::load(data_dir));
+            let settings_store = settings::SettingsStore::load(data_dir);
+            // Apply the saved tray-icon style now that settings are loaded (the
+            // tray was built with the template default in tray::setup above).
+            tray::apply_tray_icon(app.handle(), &settings_store.get().tray_icon);
+            app.manage(settings_store);
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 

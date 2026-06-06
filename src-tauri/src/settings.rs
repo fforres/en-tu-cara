@@ -40,6 +40,8 @@ pub struct Settings {
     pub menu_bar_title_chars: u32,
     /// Overlay theme id (themes.ts is the registry; unknown ids fall back).
     pub theme: String,
+    /// Menu-bar tray icon style: "auto" (template, adapts) | "light" | "dark".
+    pub tray_icon: String,
 }
 
 impl Default for Settings {
@@ -60,6 +62,7 @@ impl Default for Settings {
             show_next_event_in_menu_bar: true,
             menu_bar_title_chars: 20,
             theme: "frost-dark".into(),
+            tray_icon: "auto".into(),
         }
     }
 }
@@ -127,6 +130,11 @@ pub fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), Str
         if let Err(e) = result {
             return Err(format!("autostart: {e}"));
         }
+    }
+
+    // Live-apply: swap the menu-bar icon style immediately (no restart).
+    if previous.tray_icon != settings.tray_icon {
+        crate::tray::apply_tray_icon(&app, &settings.tray_icon);
     }
     Ok(())
 }
