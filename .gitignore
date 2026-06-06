@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# compiled checkpoint helpers (auto-rebuilt by cp1b-auto.sh)
+scripts/bin/

@@ -83,5 +83,5 @@ settings (Phase 7), hardening (Phase 8).
 ## known limitations / parked
 
 - The 7 settings reference PNGs were lost in a scaffolding accident (2026-06-05);
-  `reference-images/SETTINGS-REFERENCE.md` is the substitute. Felipe to re-screenshot
+  `docs/SETTINGS-REFERENCE.md` is the substitute. Felipe to re-screenshot
   In Your Face's settings when convenient.

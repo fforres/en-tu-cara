@@ -11,8 +11,6 @@ no param → tray popover · `overlay` (+`role=main|dim`) → alert · `settings
   it before touching colors.
 - `windows/settings/` — registry-driven settings UI. Own AGENTS.md.
 - `lib/` — pure domain logic (link extraction, classification). Own AGENTS.md.
-- `ipc/` — reserved for typed invoke wrappers (components currently call
-  `invoke()` directly).
 
 ## Interacting
 
