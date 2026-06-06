@@ -61,6 +61,10 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         // Nonactivating: takeover draws above everything but never activates the app —
         // focus stays where the user was (they may be mid-keystroke in the meeting).
         panel.set_style_mask(StyleMask::empty().nonactivating_panel().into());
+        // CP1b finding (2026-06-05): NSPanel defaults hidesOnDeactivate=YES, and an
+        // Accessory app deactivates seconds after showing — panels silently vanished
+        // ~1-2 s in. An alarm must outlive activation state; disable it.
+        panel.set_hides_on_deactivate(false);
         panel.set_collection_behavior(
             CollectionBehavior::new()
                 .can_join_all_spaces()
@@ -69,6 +73,10 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
                 .ignores_cycle()
                 .into(),
         );
+        // window.show() records visible=true on the Tauri side (else Tauri re-asserts
+        // the builder's visible:false after webview load); order_front_regardless
+        // guarantees AppKit ordering without requiring app activation.
+        window.show()?;
         panel.order_front_regardless();
 
         labels.push(label);

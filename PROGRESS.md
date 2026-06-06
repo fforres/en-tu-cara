@@ -4,10 +4,14 @@
 > Schema: phase / last_passed_auto / human_gates / needs_human / decisions.
 
 ## phase
-Phase 0 — Scaffold, identity & harness (in progress)
+Phase 1 — De-risk gates (1a PASSED, 1b-auto PASSED; 1b-human + 1a-freshness + 1c + 1d pending)
 
 ## last_passed_auto
-- (none yet — cp0 pending first run)
+- CP0 (2026-06-05) — full ladder incl. bundle + launch assertions
+- CP1a (2026-06-05) — EventKit in-bundle: permission persisted across relaunch AND
+  rebuild (ad-hoc signing OK so far); occurrence expansion PROVEN (17 series);
+  RSVP 126/147; dedup 209→147
+- CP1b-auto (2026-06-05) — 3/3 ScreenSaver-level panels (one per display), clean dismiss
 
 ## human_gates
 | gate | last passed | macOS build | notes |
@@ -21,7 +25,14 @@ Phase 0 — Scaffold, identity & harness (in progress)
 | CP6 (3-day dogfood) | — | — | |
 
 ## needs_human
-- (queue is empty)
+1. **CP1b-human** (~3 min): above-fullscreen overlay test — protocol in
+   `scripts/checkpoints/cp1b-human.md`. (Felipe already eyeballed the desktop case
+   live on 2026-06-05 — "this shows the overlay" — fullscreen case remains.)
+2. **CP1a-freshness** (~2 min now, check back over 24-48 h): create a test event from
+   your iPhone while Calendar.app is CLOSED on this Mac; we measure propagation.
+3. Decision: daily-smoke scheduling mechanism — local launchd/cron vs Claude /schedule
+   remote routine (remote can't touch this Mac's TCC/displays; lean local or
+   interactive-session checks).
 
 ## decisions
 - 2026-06-05 — Stack: Tauri v2, local-only EventKit (see report Decision Record).
@@ -33,6 +44,18 @@ Phase 0 — Scaffold, identity & harness (in progress)
   pinned =0.5.6. objc2/objc2-app-kit/objc2-foundation added for observer + fallback work.
 - 2026-06-05 — Test-mode slice (mock clock + fire log) built in Phase 0 per PLAN v3
   dependency fix (CP1d needs it).
+- 2026-06-05 — eventkit-rs CLEARS the go/no-go: occurrence expansion + RSVP + status
+  all proven on real data. No objc2-event-kit rewrite.
+- 2026-06-05 — Multi-calendar duplication discovered (same meeting once per subscribed
+  calendar; 45/209 dup keys): dedup by occurrence_key, prefer my_rsvp > organizer >
+  first. occurrence_key collisions across calendars are a FEATURE for alarm dedup.
+- 2026-06-05 — OVERLAY BUG CAUGHT BY SPIKE: NSPanel hidesOnDeactivate defaults YES →
+  panels vanished ~2 s after show in an Accessory app. Fixed: set_hides_on_deactivate(false)
+  + window.show() to sync Tauri's visible-state (else re-asserted on webview load).
+- 2026-06-05 — screencapture CANNOT see layer-1000 windows. Overlay verification =
+  CGWindowList assertions (scripts/bin/winlist, swiftc one-shot). PLAN's
+  "screencapture non-blank" idea replaced; CP5 visual checks should use
+  CGWindowListCreateImage per window id instead.
 
 ## known limitations / parked
 - The 7 settings reference PNGs were lost in a scaffolding accident (2026-06-05);
