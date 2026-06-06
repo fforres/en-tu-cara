@@ -3,6 +3,8 @@
 
 #[cfg(target_os = "macos")]
 mod calendar;
+#[cfg(target_os = "macos")]
+mod overlay;
 mod testmode;
 mod tray;
 
@@ -18,6 +20,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_nspanel::init())
         .plugin(tauri_plugin_store::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -31,6 +34,8 @@ pub fn run() {
             calendar::request_calendar_access,
             calendar::list_calendars,
             calendar::fetch_events,
+            overlay::spike_show_overlays,
+            overlay::close_overlays,
         ])
         .setup(|app| {
             // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
@@ -52,6 +57,10 @@ pub fn run() {
                 std::fs::write(&path, serde_json::to_vec_pretty(&dump)?)?;
                 println!("ENTUCARA_SPIKE_DUMP written: {}", path.display());
             }
+
+            // CP1b spike: ENTUCARA_SPIKE_OVERLAY=<secs> → timed takeover test.
+            #[cfg(target_os = "macos")]
+            overlay::maybe_run_spike(app.handle());
 
             Ok(())
         })

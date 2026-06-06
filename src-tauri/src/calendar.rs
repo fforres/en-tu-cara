@@ -105,6 +105,90 @@ fn event_dto(e: &EventItem) -> EventDto {
     }
 }
 
+/// Collapse multi-calendar duplicates of the same real-world meeting.
+///
+/// CP1a finding (2026-06-05): the same Google event surfaces once per calendar that
+/// can see it (subscribed colleague calendars, mirrored Gmail accounts) with an
+/// IDENTICAL `(identifier @ start)` key — 45 of 209 events duplicated on real data.
+/// One meeting must alert once, so we dedup by occurrence_key and keep the row most
+/// likely to be the user's own copy: has my_rsvp (their attendance) > is_organizer >
+/// first seen. The tray shows the deduped list too (reference popover has one row
+/// per meeting).
+pub fn dedup_events(events: Vec<EventDto>) -> Vec<EventDto> {
+    let mut best: std::collections::HashMap<String, EventDto> = Default::default();
+    let mut order: Vec<String> = Vec::new();
+    let score = |e: &EventDto| (e.my_rsvp.is_some() as u8) * 2 + e.is_organizer as u8;
+    for e in events {
+        match best.get(&e.occurrence_key) {
+            None => {
+                order.push(e.occurrence_key.clone());
+                best.insert(e.occurrence_key.clone(), e);
+            }
+            Some(existing) if score(&e) > score(existing) => {
+                best.insert(e.occurrence_key.clone(), e);
+            }
+            _ => {}
+        }
+    }
+    order.into_iter().filter_map(|k| best.remove(&k)).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(key: &str, rsvp: Option<&str>, organizer: bool) -> EventDto {
+        EventDto {
+            id: "id".into(),
+            occurrence_key: key.into(),
+            title: "t".into(),
+            start: "2026-06-08T09:00:00-07:00".into(),
+            end: "2026-06-08T09:15:00-07:00".into(),
+            all_day: false,
+            calendar_id: None,
+            calendar_title: None,
+            notes: None,
+            location: None,
+            url: None,
+            occurrence_date: None,
+            is_recurring_occurrence: false,
+            is_detached: false,
+            status: "confirmed".into(),
+            my_rsvp: rsvp.map(String::from),
+            is_organizer: organizer,
+            availability: "busy".into(),
+            timezone: None,
+            attendee_count: 0,
+        }
+    }
+
+    #[test]
+    fn dedup_prefers_row_with_my_rsvp() {
+        // CP1a real-data case: same meeting via a colleague's subscribed calendar
+        // (no rsvp) and via the user's own calendar (rsvp present).
+        let deduped = dedup_events(vec![
+            ev("(a @ t1)", None, false),
+            ev("(a @ t1)", Some("accepted"), false),
+            ev("(b @ t1)", None, true),
+        ]);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].my_rsvp.as_deref(), Some("accepted"));
+        assert!(deduped[1].is_organizer);
+    }
+
+    #[test]
+    fn dedup_keeps_first_seen_order_and_distinct_occurrences() {
+        let deduped = dedup_events(vec![
+            ev("(a @ t1)", None, false),
+            ev("(a @ t2)", None, false), // same series, different occurrence — kept
+            ev("(a @ t1)", None, false), // duplicate — dropped
+        ]);
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].occurrence_key, "(a @ t1)");
+        assert_eq!(deduped[1].occurrence_key, "(a @ t2)");
+    }
+}
+
 #[tauri::command]
 pub fn calendar_authorization_status() -> String {
     format!("{:?}", EventsManager::authorization_status())
@@ -140,7 +224,7 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
             None,
         )
         .map_err(|e| e.to_string())?;
-    Ok(events.iter().map(event_dto).collect())
+    Ok(dedup_events(events.iter().map(event_dto).collect()))
 }
 
 /// CP1a automation: dump auth status + calendars + ±7d events as JSON.
@@ -174,10 +258,12 @@ pub fn spike_dump() -> serde_json::Value {
         .map(|cs| cs.iter().map(calendar_dto).collect::<Vec<_>>())
         .unwrap_or_default();
     let now = Local::now();
-    let events = mgr
+    let raw_events = mgr
         .fetch_events(now - Duration::days(7), now + Duration::days(7), None)
         .map(|es| es.iter().map(event_dto).collect::<Vec<_>>())
         .unwrap_or_default();
+    let raw_count = raw_events.len();
+    let events = dedup_events(raw_events);
 
     // Occurrence-identity proof (PLAN CP1a): group recurring occurrences by event id —
     // any id with >1 row must have all-distinct starts.
@@ -203,7 +289,9 @@ pub fn spike_dump() -> serde_json::Value {
         "granted": true,
         "calendar_count": calendars.len(),
         "calendars": calendars,
+        "raw_event_count": raw_count,
         "event_count": events.len(),
+        "deduped_away": raw_count - events.len(),
         "expanded_series_proof": expanded_series,
         "events": events,
     })
