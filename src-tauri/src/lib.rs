@@ -1,12 +1,16 @@
 //! En Tu Cara — unmissable meeting alerts for macOS. Fully local (EventKit only).
 //! Architecture: PLAN.md §1.
 
+mod alarm_core;
 #[cfg(target_os = "macos")]
 mod calendar;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod scheduler;
+#[cfg(target_os = "macos")]
+mod sound;
+mod state;
 mod testmode;
 mod tray;
 
@@ -38,6 +42,12 @@ pub fn run() {
             calendar::fetch_events,
             overlay::spike_show_overlays,
             overlay::close_overlays,
+            scheduler::inject_events,
+            scheduler::get_active_alarms,
+            scheduler::snooze_alarm,
+            scheduler::dismiss_alarms,
+            scheduler::set_paused,
+            scheduler::get_paused,
         ])
         .setup(|app| {
             // Menu-bar agent: no Dock icon, no Cmd-Tab entry, never steals focus on
@@ -67,6 +77,16 @@ pub fn run() {
             // CP1d spike: ENTUCARA_SPIKE_FIRE="<secs>,<arm>" → fire-latency test.
             #[cfg(target_os = "macos")]
             scheduler::maybe_run_fire_spike(app.handle());
+
+            // Real-calendar e2e: ENTUCARA_SPIKE_REAL_E2E="<start_in_secs>".
+            #[cfg(target_os = "macos")]
+            calendar::maybe_run_real_e2e();
+
+            // Persisted alarm state + the production scheduler loop.
+            let data_dir = app.path().app_data_dir()?;
+            app.manage(state::SharedState::load(data_dir));
+            #[cfg(target_os = "macos")]
+            scheduler::spawn_loop(app.handle());
 
             Ok(())
         })

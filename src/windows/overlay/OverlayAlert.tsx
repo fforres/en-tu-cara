@@ -1,43 +1,177 @@
-import { invoke } from "@tauri-apps/api/core";
+// Fullscreen takeover alert (Phase 5). Native-feeling: system font, system
+// colors, no decoration beyond what the moment needs: title, time, countdown,
+// Join when a link exists, Snooze 1m/5m, Dismiss.
 
-// Phase 1b spike content. Phase 5 builds the real alert UI (countdown, Join,
-// Snooze, multi-event stacked cards). For the spike the job is purely visual:
-// unmissably prove the panel rendered above a fullscreen app on every display.
+import { useEffect, useMemo, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { extractMeetingLink } from "../../lib/meeting-links";
+import type { UiEvent } from "../tray/TrayPopover";
+
+interface AlarmPayload {
+  occurrence_key: string;
+  kind: "t_minus5" | "t_zero" | "snooze" | string;
+  title: string;
+  start: string | null;
+  end: string | null;
+}
+
+function countdownLabel(payload: AlarmPayload, now: Date): string {
+  if (!payload.start) return "";
+  const ms = new Date(payload.start).getTime() - now.getTime();
+  if (ms <= 0) return "started";
+  const totalSec = Math.ceil(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return `starts in ${m}:${String(s).padStart(2, "0")}`;
+}
+
 export function OverlayAlert() {
+  const [alarms, setAlarms] = useState<AlarmPayload[]>([]);
+  const [events, setEvents] = useState<UiEvent[]>([]);
+  const [now, setNow] = useState(() => new Date());
+
+  useEffect(() => {
+    // The fire emit happens BEFORE this window's JS boots — pull active alarms
+    // on mount, and listen for any that fire while we're already visible.
+    const dedupAdd = (incoming: AlarmPayload[]) =>
+      setAlarms((prev) => {
+        const seen = new Set(prev.map((a) => `${a.occurrence_key}#${a.kind}`));
+        return [...prev, ...incoming.filter((a) => !seen.has(`${a.occurrence_key}#${a.kind}`))];
+      });
+    invoke<AlarmPayload[]>("get_active_alarms").then(dedupAdd).catch(() => {});
+    const unlistenPromise = listen<AlarmPayload>("alarm-fired", (e) => dedupAdd([e.payload]));
+    invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 1 })
+      .then(setEvents)
+      .catch(() => {});
+    const clock = setInterval(() => setNow(new Date()), 1000);
+    return () => {
+      unlistenPromise.then((u) => u());
+      clearInterval(clock);
+    };
+  }, []);
+
+  const cards = useMemo(() => {
+    return alarms.map((alarm) => {
+      const event = events.find((e) => e.occurrence_key === alarm.occurrence_key);
+      const link = event ? extractMeetingLink(event) : null;
+      return { alarm, event, link };
+    });
+  }, [alarms, events]);
+
   return (
     <main
       style={{
-        fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif",
-        background: "rgba(20, 20, 24, 0.96)",
-        color: "#fff",
+        font: "17px system-ui, -apple-system, sans-serif",
+        colorScheme: "light dark",
+        background: "color-mix(in srgb, Canvas 92%, transparent)",
+        color: "CanvasText",
         height: "100vh",
         display: "flex",
         alignItems: "center",
         justifyContent: "center",
         flexDirection: "column",
-        gap: 24,
+        gap: 20,
         userSelect: "none",
       }}
     >
-      <div style={{ fontSize: 96 }}>⏰</div>
-      <h1 style={{ fontSize: 56, margin: 0 }}>EN TU CARA</h1>
-      <p style={{ fontSize: 24, opacity: 0.7, margin: 0 }}>
-        Overlay spike — am I above your fullscreen app?
-      </p>
-      <button
-        onClick={() => invoke("close_overlays")}
-        style={{
-          fontSize: 20,
-          padding: "12px 32px",
-          borderRadius: 10,
-          border: "none",
-          background: "#e8833a",
-          color: "#fff",
-          cursor: "pointer",
-        }}
-      >
-        Dismiss
-      </button>
+      <div style={{ fontSize: 64 }}>⏰</div>
+
+      {cards.length === 0 && <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>}
+
+      {cards.map(({ alarm, link }) => (
+        <section
+          key={`${alarm.occurrence_key}#${alarm.kind}`}
+          style={{
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            gap: 10,
+            padding: "24px 40px",
+            borderRadius: 14,
+            background: "color-mix(in srgb, CanvasText 6%, transparent)",
+            maxWidth: 720,
+          }}
+        >
+          <h1 style={{ margin: 0, fontSize: 34, fontWeight: 700, textAlign: "center" }}>
+            {alarm.title || "Untitled event"}
+          </h1>
+          <div style={{ fontSize: 18, opacity: 0.75 }}>
+            {alarm.start &&
+              `${new Date(alarm.start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}${
+                alarm.end
+                  ? ` – ${new Date(alarm.end).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`
+                  : ""
+              }`}
+          </div>
+          <div style={{ fontSize: 20, fontVariantNumeric: "tabular-nums" }}>
+            {countdownLabel(alarm, now)}
+          </div>
+
+          <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+            {link && (
+              <button
+                autoFocus
+                onClick={async () => {
+                  await openUrl(link.url);
+                  invoke("dismiss_alarms");
+                }}
+                style={{
+                  font: "inherit",
+                  fontWeight: 600,
+                  padding: "10px 28px",
+                  borderRadius: 8,
+                  border: "none",
+                  background: "Highlight",
+                  color: "HighlightText",
+                  cursor: "pointer",
+                }}
+              >
+                📹 Join
+              </button>
+            )}
+            <button
+              onClick={() => invoke("dismiss_alarms")}
+              style={{
+                font: "inherit",
+                padding: "10px 28px",
+                borderRadius: 8,
+                border: "1px solid color-mix(in srgb, CanvasText 25%, transparent)",
+                background: "transparent",
+                color: "CanvasText",
+                cursor: "pointer",
+              }}
+            >
+              Dismiss
+            </button>
+          </div>
+
+          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+            {[1, 5].map((m) => (
+              <button
+                key={m}
+                onClick={() =>
+                  invoke("snooze_alarm", { occurrenceKey: alarm.occurrence_key, minutes: m })
+                }
+                style={{
+                  font: "inherit",
+                  fontSize: 13,
+                  padding: "5px 14px",
+                  borderRadius: 6,
+                  border: "1px solid color-mix(in srgb, CanvasText 20%, transparent)",
+                  background: "transparent",
+                  color: "CanvasText",
+                  opacity: 0.8,
+                  cursor: "pointer",
+                }}
+              >
+                Snooze {m} min
+              </button>
+            ))}
+          </div>
+        </section>
+      ))}
     </main>
   );
 }

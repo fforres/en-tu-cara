@@ -51,16 +51,32 @@ pub struct FireRecord {
 
 static FIRE_LOG: Mutex<Vec<FireRecord>> = Mutex::new(Vec::new());
 
-/// Called by the scheduler on every fire (Phase 1d/3); allow until then.
-#[allow(dead_code)]
 pub fn log_fire(key: &str, kind: &str, scheduled_for: DateTime<Utc>) {
-    FIRE_LOG.lock().unwrap().push(FireRecord {
+    let record = FireRecord {
         key: key.to_string(),
         kind: kind.to_string(),
         fired_at_wall: Utc::now(),
         fired_at_app: clock::now(),
         scheduled_for,
-    });
+    };
+    // Test mode: mirror to disk so checkpoint scripts can assert the sequence
+    // without webview IPC (Tauri commands aren't externally invokable).
+    if is_test_mode() {
+        if let Some(home) = std::env::var_os("HOME") {
+            let dir = std::path::Path::new(&home)
+                .join("Library/Application Support/dev.fforres.entucara");
+            let _ = std::fs::create_dir_all(&dir);
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("fire-log.jsonl"))
+            {
+                use std::io::Write;
+                let _ = writeln!(f, "{}", serde_json::to_string(&record).unwrap_or_default());
+            }
+        }
+    }
+    FIRE_LOG.lock().unwrap().push(record);
 }
 
 #[tauri::command]

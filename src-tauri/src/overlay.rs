@@ -27,17 +27,33 @@ tauri_panel! {
 const OVERLAY_LABEL_PREFIX: &str = "overlay-";
 
 /// Spawn one takeover panel per connected display. Returns the labels created.
+///
+/// If overlays are ALREADY live (T-0 firing while the T-5 alert is still up —
+/// the normal back-to-back case), reuse them: re-front and return. Recreating
+/// is both wasteful and a crash (close() is async, the label is still taken,
+/// and the builder's failure path raised an ObjC exception that aborted Rust —
+/// caught by CP3 e2e 2026-06-05).
 pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
+    let live: Vec<String> = app
+        .webview_windows()
+        .keys()
+        .filter(|l| l.starts_with(OVERLAY_LABEL_PREFIX))
+        .cloned()
+        .collect();
+    if !live.is_empty() {
+        for label in &live {
+            if let Ok(panel) = app.get_webview_panel(label) {
+                panel.order_front_regardless();
+            }
+        }
+        return Ok(live);
+    }
+
     let monitors = app.available_monitors()?;
     let mut labels = Vec::new();
 
     for (i, monitor) in monitors.iter().enumerate() {
         let label = format!("{OVERLAY_LABEL_PREFIX}{i}");
-
-        // Tear down any stale window with this label (re-fire while visible).
-        if let Some(existing) = app.get_webview_window(&label) {
-            let _ = existing.close();
-        }
 
         let scale = monitor.scale_factor();
         let pos = monitor.position().to_logical::<f64>(scale);

@@ -86,6 +86,245 @@ fn wait_until(target: DateTime<Utc>) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Production loop (Phase 3)
+// ---------------------------------------------------------------------------
+
+use crate::alarm_core::{compute_actions, next_due, AlarmEvent, AlarmKind};
+use crate::state::SharedState;
+use serde::Deserialize;
+use std::sync::Mutex;
+use tauri::Emitter;
+
+/// Events injected via test-mode IPC override EventKit (PLAN §1 test mode).
+pub static INJECTED_EVENTS: Mutex<Option<Vec<AlarmEvent>>> = Mutex::new(None);
+
+/// Alarms currently presented in the overlay. The overlay webview boots AFTER
+/// the fire emit, so it pulls these on mount (and also listens for later emits).
+pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
+
+#[tauri::command]
+pub fn get_active_alarms() -> Vec<serde_json::Value> {
+    ACTIVE_ALARMS.lock().unwrap().clone()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InjectableEvent {
+    pub occurrence_key: String,
+    pub title: String,
+    pub start: String, // RFC3339
+    pub end: String,
+    #[serde(default)]
+    pub all_day: bool,
+    #[serde(default = "default_status")]
+    pub status: String,
+    #[serde(default)]
+    pub my_rsvp: Option<String>,
+}
+fn default_status() -> String {
+    "confirmed".into()
+}
+
+#[tauri::command]
+pub fn inject_events(events: Vec<InjectableEvent>) -> Result<usize, String> {
+    if !crate::testmode::is_test_mode() {
+        return Err("not in test mode".into());
+    }
+    let parsed: Result<Vec<AlarmEvent>, String> = events
+        .into_iter()
+        .map(|e| {
+            Ok(AlarmEvent {
+                start: DateTime::parse_from_rfc3339(&e.start)
+                    .map_err(|err| err.to_string())?
+                    .with_timezone(&Utc),
+                end: DateTime::parse_from_rfc3339(&e.end)
+                    .map_err(|err| err.to_string())?
+                    .with_timezone(&Utc),
+                occurrence_key: e.occurrence_key,
+                title: e.title,
+                all_day: e.all_day,
+                status: e.status,
+                my_rsvp: e.my_rsvp,
+            })
+        })
+        .collect();
+    let parsed = parsed?;
+    let n = parsed.len();
+    *INJECTED_EVENTS.lock().unwrap() = Some(parsed);
+    Ok(n)
+}
+
+/// ENTUCARA_TEST_EVENTS='[{"key":"e2e","title":"…","start_in":15,"duration":60}]'
+/// — relative seconds from process launch; lets a shell script drive a full
+/// alarm lifecycle in seconds without webview IPC (PLAN test-mode substitute).
+fn env_test_events() -> Option<Vec<AlarmEvent>> {
+    use std::sync::OnceLock;
+    static PARSED: OnceLock<Option<Vec<AlarmEvent>>> = OnceLock::new();
+    PARSED
+        .get_or_init(|| {
+            let raw = std::env::var("ENTUCARA_TEST_EVENTS").ok()?;
+            let base = Utc::now();
+            let specs: Vec<serde_json::Value> = serde_json::from_str(&raw).ok()?;
+            Some(
+                specs
+                    .iter()
+                    .map(|s| {
+                        let start_in = s["start_in"].as_i64().unwrap_or(15);
+                        let duration = s["duration"].as_i64().unwrap_or(60);
+                        let start = base + ChronoDuration::seconds(start_in);
+                        AlarmEvent {
+                            occurrence_key: s["key"].as_str().unwrap_or("e2e").to_string(),
+                            title: s["title"].as_str().unwrap_or("E2E Test Meeting").to_string(),
+                            start,
+                            end: start + ChronoDuration::seconds(duration),
+                            all_day: false,
+                            status: s["status"].as_str().unwrap_or("confirmed").to_string(),
+                            my_rsvp: s["my_rsvp"].as_str().map(String::from),
+                        }
+                    })
+                    .collect(),
+            )
+        })
+        .clone()
+}
+
+fn upcoming_alarm_events() -> Vec<AlarmEvent> {
+    if let Some(injected) = INJECTED_EVENTS.lock().unwrap().clone() {
+        return injected;
+    }
+    if crate::testmode::is_test_mode() {
+        if let Some(env_events) = env_test_events() {
+            return env_events;
+        }
+    }
+    // EventKit fetch: 1 day back (ongoing events started earlier) + 1 forward.
+    crate::calendar::fetch_events(1, 1)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|e| {
+            Some(AlarmEvent {
+                start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
+                end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
+                occurrence_key: e.occurrence_key,
+                title: e.title,
+                all_day: e.all_day,
+                status: e.status,
+                my_rsvp: e.my_rsvp,
+            })
+        })
+        .collect()
+}
+
+/// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
+fn tick(app: &tauri::AppHandle) -> u64 {
+    let now = crate::testmode::clock::now();
+    let events = upcoming_alarm_events();
+    let state = app.state::<SharedState>();
+
+    let actions = {
+        let alarms = state.alarms.lock().unwrap();
+        compute_actions(&events, now, &alarms)
+    };
+
+    for action in &actions {
+        state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
+        crate::testmode::log_fire(
+            &action.occurrence_key,
+            match action.kind {
+                AlarmKind::TMinus5 => "t_minus_5",
+                AlarmKind::TZero => "t_zero",
+                AlarmKind::Snooze => "snooze",
+            },
+            action.due_at,
+        );
+        if action.suppressed {
+            continue;
+        }
+        let event = events.iter().find(|e| e.occurrence_key == action.occurrence_key);
+        let payload = serde_json::json!({
+            "occurrence_key": action.occurrence_key,
+            "kind": action.kind,
+            "title": event.map(|e| e.title.clone()).unwrap_or_default(),
+            "start": event.map(|e| e.start.to_rfc3339()),
+            "end": event.map(|e| e.end.to_rfc3339()),
+        });
+        ACTIVE_ALARMS.lock().unwrap().push(payload.clone());
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            match crate::overlay::show_overlays(&handle) {
+                Ok(_) => {
+                    crate::sound::play(crate::sound::DEFAULT_ALERT_SOUND);
+                    // Already-booted overlay windows get the push; freshly created
+                    // ones pull via get_active_alarms on mount.
+                    let _ = handle.emit("alarm-fired", &payload);
+                }
+                Err(e) => eprintln!("overlay failed: {e}"),
+            }
+        });
+    }
+
+    // Wall-clock arming: wake at the next due alarm (capped) or the poll backstop.
+    let alarms = state.alarms.lock().unwrap();
+    match next_due(&events, now, &alarms) {
+        Some(due) => ((due - now).num_seconds().clamp(1, 30)) as u64,
+        None => 30,
+    }
+}
+
+/// Spawn the production scheduler loop. Tick cadence ≤30 s (poll backstop —
+/// catches calendar edits and self-heals after sleep: first tick post-wake runs
+/// compute_actions and the fire-if-ongoing policy covers missed alarms).
+/// Holds the latencyCritical assertion only while an alarm is ≤120 s out (PLAN §1).
+pub fn spawn_loop(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        let sleep_secs = tick(&app);
+
+        // Windowed precision assertion: close-in alarms get latencyCritical.
+        if sleep_secs <= 120 {
+            let _assertion = ActivityAssertion::begin(
+                NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical,
+                "en-tu-cara: alarm imminent",
+            );
+            std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
+        } else {
+            std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
+        }
+    });
+}
+
+#[tauri::command]
+pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64) {
+    let state = app.state::<SharedState>();
+    let until = crate::testmode::clock::now() + ChronoDuration::minutes(minutes);
+    state.update(|a| a.snooze(&occurrence_key, until));
+    ACTIVE_ALARMS.lock().unwrap().clear();
+    crate::overlay::close_overlays(app.clone());
+}
+
+#[tauri::command]
+pub fn dismiss_alarms(app: tauri::AppHandle) {
+    ACTIVE_ALARMS.lock().unwrap().clear();
+    crate::overlay::close_overlays(app);
+}
+
+#[tauri::command]
+pub fn set_paused(app: tauri::AppHandle, paused: bool) {
+    let state = app.state::<SharedState>();
+    state.update(|a| a.paused = paused);
+}
+
+#[tauri::command]
+pub fn get_paused(app: tauri::AppHandle) -> bool {
+    let state = app.state::<SharedState>();
+    let paused = state.alarms.lock().unwrap().paused;
+    paused
+}
+
+// ---------------------------------------------------------------------------
+// CP1d spike (kept for latency re-measurement)
+// ---------------------------------------------------------------------------
+
 /// CP1d: ENTUCARA_SPIKE_FIRE="<delay_secs>,<arm>" → measure fire latency, exit app.
 pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
     let Ok(spec) = std::env::var("ENTUCARA_SPIKE_FIRE") else {

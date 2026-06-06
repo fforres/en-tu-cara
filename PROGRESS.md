@@ -4,7 +4,9 @@
 > Schema: phase / last_passed_auto / human_gates / needs_human / decisions.
 
 ## phase
-Phase 1 — De-risk gates (1a PASSED, 1b-auto PASSED; 1b-human + 1a-freshness + 1c + 1d pending)
+MVP CORE COMPLETE (Phases 0-5 auto-tiers all passed 2026-06-05). Remaining: human
+gates (1b fullscreen, popover visual), 1a-freshness probe, packaging polish (Phase 6),
+settings (Phase 7), hardening (Phase 8).
 
 ## last_passed_auto
 - CP0 (2026-06-05) — full ladder incl. bundle + launch assertions
@@ -12,6 +14,15 @@ Phase 1 — De-risk gates (1a PASSED, 1b-auto PASSED; 1b-human + 1a-freshness + 
   rebuild (ad-hoc signing OK so far); occurrence expansion PROVEN (17 series);
   RSVP 126/147; dedup 209→147
 - CP1b-auto (2026-06-05) — 3/3 ScreenSaver-level panels (one per display), clean dismiss
+- CP1d (2026-06-05) — fire latency 1 ms on AC power, WORST-case arm (no assertion);
+  battery-condition re-test deferred to dogfood; windowed latencyCritical kept anyway
+- CP2 (2026-06-05) — 54 TS tests: 35 link fixtures (8 providers + generic), 18 classify edges
+- CP3-auto (2026-06-05) — injected-event lifecycle in 25 s: T-5 overlay 3/3 displays,
+  [t_minus_5, t_zero] sequence, 0.0 s latency, declined never fires. CAUGHT overlay
+  recreate crash (ObjC exception → SIGABRT) — fixed via reuse-live-panels
+- REAL-PIPELINE E2E (2026-06-05) — real EventKit event created/discovered/fired:
+  T-0 latency 0.57 s, Join link extracted from notes, auto-cleanup verified.
+  RAM: 76 MB idle / 88 MB with 3 overlay panels (main process RSS)
 
 ## human_gates
 | gate | last passed | macOS build | notes |

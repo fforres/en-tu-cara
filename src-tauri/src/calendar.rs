@@ -227,6 +227,58 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
     Ok(dedup_events(events.iter().map(event_dto).collect()))
 }
 
+/// Real-pipeline e2e (user-authorized fast test): create a REAL EventKit event
+/// starting +`start_in`s on a dedicated "En Tu Cara Test" calendar, let the
+/// production loop discover it (EventKit → dedup → alarm → overlay), then clean
+/// up both event and calendar. Enabled via ENTUCARA_SPIKE_REAL_E2E="<start_in>".
+pub fn maybe_run_real_e2e() {
+    let Ok(start_in) = std::env::var("ENTUCARA_SPIKE_REAL_E2E") else {
+        return;
+    };
+    let start_in: i64 = start_in.parse().unwrap_or(70);
+    std::thread::spawn(move || {
+        let mgr = EventsManager::new();
+        if mgr.ensure_authorized().is_err() {
+            eprintln!("REAL_E2E: not authorized");
+            return;
+        }
+        // Prefer a dedicated local test calendar; many default sources (Google)
+        // refuse calendar creation (EKErrorDomain 17) → fall back to the default
+        // calendar. The event auto-deletes either way.
+        let test_cal = mgr.create_event_calendar("En Tu Cara Test").ok();
+        let cal_title = test_cal.as_ref().map(|_| "En Tu Cara Test");
+
+        let start = Local::now() + Duration::seconds(start_in);
+        let draft = eventkit::EventDraft {
+            title: "En Tu Cara REAL E2E (auto-deletes)",
+            start: Some(start),
+            end: Some(start + Duration::seconds(90)),
+            notes: Some("Join: https://us04web.zoom.us/j/000000000?pwd=e2e"),
+            calendar_title: cal_title,
+            ..Default::default()
+        };
+        match mgr.create_event(&draft) {
+            Ok(event) => {
+                println!("REAL_E2E created: {} start={}", event.identifier, start.to_rfc3339());
+                // Leave it alive through T-0 + margin, then clean up.
+                let wait = (start_in + 120).max(0) as u64;
+                std::thread::sleep(std::time::Duration::from_secs(wait));
+                let _ = mgr.delete_event(&event.identifier, false);
+                if let Some(cal) = &test_cal {
+                    let _ = mgr.delete_event_calendar(&cal.identifier);
+                }
+                println!("REAL_E2E cleaned up");
+            }
+            Err(e) => {
+                eprintln!("REAL_E2E: create event failed: {e}");
+                if let Some(cal) = &test_cal {
+                    let _ = mgr.delete_event_calendar(&cal.identifier);
+                }
+            }
+        }
+    });
+}
+
 /// CP1a automation: dump auth status + calendars + ±7d events as JSON.
 /// Invoked on startup when ENTUCARA_SPIKE_DUMP=1 (see lib.rs setup).
 pub fn spike_dump() -> serde_json::Value {
