@@ -139,7 +139,9 @@ pub fn run() {
             calendar::maybe_run_real_e2e();
 
             // Persisted alarm state + settings + the production scheduler loop.
-            let data_dir = app.path().app_data_dir()?;
+            // Persist state + settings in the Skyward data dir (~/.config/skyward/
+            // en-tu-cara), not ~/Library — no existing users to migrate (PROGRESS).
+            let data_dir = paths::data_dir();
             app.manage(state::SharedState::load(data_dir.clone()));
             app.manage(settings::SettingsStore::load(data_dir));
             #[cfg(target_os = "macos")]
