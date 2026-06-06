@@ -43,10 +43,14 @@ jobs:
           node-version: 24
           cache: pnpm
 
+      # Apple Silicon only — we don't ship Intel. Single arch ≈ half the build
+      # time of a universal binary. macos-14 is already an arm64 host.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
+          targets: aarch64-apple-darwin
 
+      # Caches ~/.cargo + src-tauri/target across runs so warm builds skip
+      # recompiling tauri and the dependency tree (the bulk of the build time).
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
@@ -75,4 +79,4 @@ jobs:
           releaseBody: ${{ inputs.body != '' && inputs.body || 'Download the .dmg below. Installed copies self-update automatically.' }}
           releaseDraft: false
           prerelease: false
-          args: --target universal-apple-darwin
+          args: --target aarch64-apple-darwin

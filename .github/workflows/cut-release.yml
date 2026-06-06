@@ -40,6 +40,7 @@ jobs:
 
           # The build files must agree with release.json — `pnpm release` keeps
           # them in sync; this catches a hand-edit that forgot to propagate.
+          # shellcheck disable=SC2016  # ${...} below are JS template literals, not shell
           node -e '
             const fs = require("fs");
             const want = require("./release.json").version;
@@ -71,9 +72,9 @@ jobs:
           git tag -fa "$TAG" -m "En Tu Cara $TAG"
           git push -f origin "$TAG"
 
-          echo "release=true" >> "$GITHUB_OUTPUT"
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           {
+            echo "release=true"
+            echo "tag=$TAG"
             echo "body<<__NOTES__"
             node -p "require('./release.json').notes || ''"
             echo "__NOTES__"
