@@ -94,8 +94,11 @@ Gatekeeper does not:
   notify-only (`runStartupUpdateCheck(false)`) until notarization is set up if
   the relaunch proves disruptive.
 - **Notarized (recommended once you have an Apple Developer account, $99/yr):**
-  no warnings, seamless self-update. Add these six repo secrets and the workflow
-  uses them automatically (already wired in `release.yml`):
+  no warnings, seamless self-update. The `APPLE_*` env vars are intentionally
+  **not** wired in `release.yml` right now — passing them empty makes
+  tauri-action fail the bundle at `security import`. To enable notarization,
+  uncomment/add the six `APPLE_*` lines back to the tauri-action `env:` block
+  **and** set the matching repo secrets:
 
   | Secret                       | What                                           |
   | ---------------------------- | ---------------------------------------------- |

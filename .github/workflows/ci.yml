@@ -1,20 +1,24 @@
 name: CI
 
-# Runs the full test suite on every PR (and on pushes to main). The `frontend`
-# and `rust` checks are required by the "Require passing tests" ruleset, so a PR
-# can't merge to main until both are green. See https://github.com/fforres/en-tu-cara/settings/rules
+# Runs the test suite on real (non-draft) pull requests only — NOT on draft PRs,
+# and NOT on pushes to main (merging is already gated by the PR check). The
+# `frontend` and `rust` checks are required by the "Require passing tests"
+# ruleset, so a PR can't merge to main until both are green.
+# https://github.com/fforres/en-tu-cara/settings/rules
 on:
   pull_request:
-  push:
-    branches: [main]
+    # ready_for_review fires when a draft is marked ready, so checks run then.
+    types: [opened, synchronize, reopened, ready_for_review]
 
+# Cancel superseded runs on the same PR (saves CI minutes on rapid pushes).
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 jobs:
   frontend:
     name: frontend
+    if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -34,21 +38,15 @@ jobs:
 
   rust:
     name: rust
-    runs-on: macos-14 # macOS-only app: EventKit / NSPanel code is cfg(macos)
+    if: ${{ !github.event.pull_request.draft }}
+    # macOS-only app: tray.rs imports tauri-nspanel/objc2 unconditionally and the
+    # EventKit/NSPanel modules are cfg(macos), so the crate does NOT compile on
+    # Linux — these tests must run on macOS. Kept lean to limit the 10x runner
+    # cost: a stub dist satisfies tauri::generate_context!() (no Node/Vite build),
+    # --lib skips the binary + doctests, and rust-cache makes warm runs fast.
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v6
-
-      - uses: pnpm/action-setup@v6
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: 24
-          cache: pnpm
-
-      # tauri::generate_context!() embeds frontendDist (../dist) at compile time,
-      # so the bundle must be built before the crate (and its tests) will compile.
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -56,4 +54,6 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - run: cargo test --manifest-path src-tauri/Cargo.toml
+      - run: mkdir -p dist && printf '<!doctype html><title>en-tu-cara tests</title>' > dist/index.html
+
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --lib
