@@ -1,4 +1,4 @@
-//! Native alert sound via NSSound (PLAN §1: never webview audio — WKWebView
+//! Native alert sound via NSSound (never webview audio — WKWebView
 //! autoplay gating makes it unfit for an alarm).
 //!
 //! The alert sound is RECURRING (user requirement): it repeats for as long as

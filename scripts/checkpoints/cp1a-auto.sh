@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CP1a automated tier (PLAN §2 Phase 1a): EventKit-in-bundle proof.
+# CP1a automated tier: EventKit-in-bundle proof.
 #   - Launches the PACKAGED app with ENTUCARA_SPIKE_DUMP=1
 #   - First run triggers the TCC prompt (❗HUMAN grants it once)
 #   - Validates dump schema: calendars w/ account+color, events w/ occurrence_key,
@@ -70,7 +70,7 @@ echo "== CP1a: relaunch — permission persistence =="
 run_dump
 STATUS=$(python3 -c "import json,sys; print(json.load(open('$DUMP'))['auth_status_at_launch'])")
 [[ "$STATUS" == "FullAccess" ]] && pass "permission persisted across relaunch (status=$STATUS)" \
-  || fail "permission did NOT persist (status=$STATUS) — ad-hoc signing TCC issue, see PROGRESS decisions"
+  || fail "permission did NOT persist (status=$STATUS) — ad-hoc signing TCC issue"
 
 echo "CP1a-auto PASSED"
-echo "REMAINING HUMAN STEPS: (1) iPhone test event freshness probe (24-48h), see PLAN CP1a."
+echo "REMAINING HUMAN STEPS: (1) iPhone test event freshness probe (24-48h)."

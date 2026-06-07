@@ -1,35 +1,61 @@
-# CP1b — Human gate protocol: overlay above fullscreen
+# Human check: does the takeover render ABOVE another app's fullscreen?
 
-**Why a human:** macOS excludes layer-1000 windows from screencapture, and no API
-proves "rendered above ANOTHER app's fullscreen Space" — only eyes do (PLAN §3).
+This is the one thing automation can't prove. `screencapture` and CGWindowList
+both report our transparent panels unreliably — a screenshot can look empty while
+the overlay is plainly on screen — and **neither tells you z-order**. "On top of
+another app's fullscreen Space" is a claim only human eyes can confirm. So when
+the overlay code, the panel level, or the collection behavior changes (and after
+any macOS update), a person has to look.
 
-## Steps (~3 minutes)
+## Setup
 
-1. Build current: `pnpm tauri build`
-2. Make **Zoom** (or Chrome) fullscreen (green button) on your MAIN display.
-3. In a terminal:
+1. Build the real thing — the panel level/Spaces behavior only holds in a
+   packaged build, not `cargo run`:
    ```sh
-   ENTUCARA_SPIKE_OVERLAY=8 "src-tauri/target/release/bundle/macos/En Tu Cara.app/Contents/MacOS/en-tu-cara"
+   pnpm tauri build
    ```
-4. Within 8 s, click into the fullscreen app so it is FOCUSED. Don't touch anything.
-5. **PASS criteria — all must hold:**
-   - [ ] Takeover appears ABOVE the fullscreen app (not on another desktop/Space)
-   - [ ] It appears WITHOUT you clicking/focusing anything (timer-triggered)
-   - [ ] It covers ALL displays (check every monitor)
-   - [ ] Focus did not leave the fullscreen app (type — keystrokes still go there
-         until you click the overlay)
-   - [ ] Dismiss button works; after 12 s any remaining panels self-close
-6. Repeat once with the fullscreen app on a SECONDARY display.
+2. Put another app into **true fullscreen** (green button / ⌃⌘F), not just a
+   maximized window. Good choices: Zoom, a Chrome tab, Keynote, QuickTime.
+3. Do this once on the **built-in display** and once on an **external display**.
 
-## Record the result
+## Trigger the overlay
 
-Append to PROGRESS.md → human_gates: `CP1b | <date> | <sw_vers productVersion+buildVersion> | pass/fail + notes`
+Fire a takeover without waiting for a real meeting — `ENTUCARA_SPIKE_OVERLAY=<s>`
+shows it after `<s>` seconds, then self-dismisses (env vars: `src-tauri/CLAUDE.md`):
 
-**If it fails** (overlay under fullscreen / wrong Space): this is the documented
-tauri #5566-class behavior. Mitigations to try in order: (1) confirm app is running
-as Accessory (it is, by default), (2) re-apply level+behavior after `order_front_regardless`,
-(3) escalate per PLAN §2 GO/NO-GO (stack fallback).
+```sh
+ENTUCARA_SILENT=1 ENTUCARA_SPIKE_OVERLAY=8 \
+  "src-tauri/target/release/bundle/macos/En Tu Cara.app/Contents/MacOS/en-tu-cara"
+```
+
+After launching, click into the fullscreen app so it is **focused**, then don't
+touch anything — the point is to prove the overlay appears over a focused
+fullscreen app on its own, with no interaction. (Drop `ENTUCARA_SILENT=1` if you
+also want to confirm the sound is audible.)
+
+## Pass criteria — all must hold, on each display
+
+- [ ] The takeover appears **above** the fullscreen app — same screen, not a flash
+      on a different Space/desktop.
+- [ ] It appears **without you clicking or focusing anything** (timer-triggered).
+- [ ] It covers **every** display.
+- [ ] Keyboard focus stays with the fullscreen app until you click the overlay
+      (type — keystrokes still go to the app underneath).
+- [ ] Dismiss (button / Esc) closes it cleanly; any leftover panels self-close
+      when the spike window elapses.
+
+## If it fails (overlay appears *under* the fullscreen app, or on the wrong Space)
+
+Check, in order:
+
+1. The app is running as an **Accessory** (no Dock icon) — it is, by default.
+2. The panel's level + collection behavior are re-applied **after**
+   `order_front_regardless` (see `src-tauri/src/overlay.rs`).
+3. Confirm the panel level is ScreenSaver-tier and the collection behavior includes
+   can-join-all-spaces + fullscreen-auxiliary + stationary.
 
 ## Re-run cadence
 
-After every macOS update (`sw_vers` drift auto-flags this gate), and at every phase gate.
+Note the macOS build you tested on (`sw_vers -productVersion`,
+`sw_vers -buildVersion`). Re-run this check after every macOS update — overlay
+z-order is exactly the kind of behavior Apple can regress between releases.

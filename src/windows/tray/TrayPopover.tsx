@@ -196,7 +196,7 @@ export function TrayPopover() {
 
   useEffect(() => {
     void refresh();
-    const data = setInterval(() => void refresh(), 30_000); // poll backstop (PLAN §1)
+    const data = setInterval(() => void refresh(), 30_000); // poll backstop
     const clock = setInterval(() => setNow(new Date()), 15_000);
     const onFocus = () => void refresh(); // popover shown → instant freshness
     window.addEventListener("focus", onFocus);

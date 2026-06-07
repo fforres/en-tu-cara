@@ -1,4 +1,4 @@
-// Settings registry (PLAN Phase 7): every setting is DATA — the sidebar TOC,
+// Settings registry: every setting is DATA — the sidebar TOC,
 // the section views, and fuzzy search are all generated from this list.
 
 export type SectionId =

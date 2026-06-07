@@ -1,6 +1,6 @@
 //! EventKit access (Phase 1a spike → grows into the production calendar layer).
 //!
-//! CP1a proofs this module must deliver (PLAN §2):
+//! What this module must deliver:
 //!   1. Permission flow works from THIS bundle id and persists across relaunch.
 //!   2. Recurring series come back EXPANDED: N rows, distinct occurrence starts,
 //!      a usable composite key (identifier, occurrence_start).
@@ -33,7 +33,7 @@ pub struct EventDto {
     /// EKEvent identifier — NOT unique per occurrence; see `occurrence_key`.
     pub id: String,
     /// Composite key "(id @ occurrence_start_rfc3339)" — THE identity used by
-    /// fired-set / snooze / dedup everywhere (PLAN §1).
+    /// fired-set / snooze / dedup everywhere.
     pub occurrence_key: String,
     pub title: String,
     pub start: String,
@@ -51,7 +51,7 @@ pub struct EventDto {
     /// confirmed | tentative | canceled | none — canceled never alerts.
     pub status: String,
     /// Current user's RSVP: accepted | declined | tentative | pending | unknown…
-    /// declined never alerts (PLAN §0).
+    /// declined never alerts.
     pub my_rsvp: Option<String>,
     pub is_organizer: bool,
     pub availability: String,
@@ -317,7 +317,7 @@ pub fn spike_dump() -> serde_json::Value {
     let status = format!("{:?}", EventsManager::authorization_status());
     let mgr = EventsManager::new();
 
-    // First run: this triggers the TCC prompt (bundle identity matters — PLAN CP1a).
+    // First run: this triggers the TCC prompt (bundle identity matters).
     let granted = if matches!(
         EventsManager::authorization_status(),
         AuthorizationStatus::NotDetermined
@@ -349,7 +349,7 @@ pub fn spike_dump() -> serde_json::Value {
     let raw_count = raw_events.len();
     let events = dedup_events(raw_events);
 
-    // Occurrence-identity proof (PLAN CP1a): group recurring occurrences by event id —
+    // Occurrence-identity proof: group recurring occurrences by event id —
     // any id with >1 row must have all-distinct starts.
     let mut by_id: std::collections::HashMap<&str, Vec<&str>> = Default::default();
     for e in events.iter().filter(|e| e.is_recurring_occurrence) {

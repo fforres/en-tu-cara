@@ -1,6 +1,6 @@
 [package]
 name = "en-tu-cara"
-version = "0.3.1"
+version = "0.3.2"
 description = "Unmissable meeting alerts for macOS. Fully local."
 authors = ["fforres"]
 edition = "2021"
@@ -24,10 +24,10 @@ chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
 
 # Overlay: native NSPanel (screenSaver level + collectionBehavior). Pinned to exact
-# rev on the v2.1 branch — branch is not default; unpinned = non-reproducible (PLAN §1).
+# rev on the v2.1 branch — branch is not default; unpinned = non-reproducible.
 [target.'cfg(target_os = "macos")'.dependencies]
 tauri-nspanel = { git = "https://github.com/ahkohd/tauri-nspanel", rev = "a3122e894383aa068ec5365a42994e3ac94ba1b6" }
-# EventKit safe wrapper. Pinned exact: 5-star single-maintainer crate (PLAN risk register);
+# EventKit safe wrapper. Pinned exact: 5-star single-maintainer crate;
 # CP1a proves occurrence expansion + RSVP fields or we switch to objc2-event-kit.
 eventkit-rs = "=0.5.6"
 # Direct dep ONLY for EKEventStore::refreshSourcesIfNecessary (eventkit-rs doesn't

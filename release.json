@@ -1,5 +1,5 @@
 {
   "_comment": "Single source of truth for the app version. Bump with `pnpm release <patch|minor|major>` (it propagates to package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml). Merging a version CHANGE here to main is what cuts a GitHub release — ordinary merges do nothing. See docs/RELEASING.md.",
-  "version": "0.3.1",
-  "notes": "En Tu Cara 0.3.1 — unmissable, fully-local meeting alerts for the macOS menu bar (Apple Silicon).\n\n- First-run onboarding: a welcome window walks you through granting calendar and notification access, instead of bare permission prompts.\n- New Settings → About tab: app version with a Check for Updates button, links to the source code and help/support, and a note that the app is free, open-source and volunteer-run.\n- Now MIT-licensed.\n\nAd-hoc signed for now: on first launch right-click → Open (or System Settings → Privacy & Security → Open Anyway) until notarization is set up."
+  "version": "0.3.2",
+  "notes": "En Tu Cara 0.3.2 — unmissable, fully-local meeting alerts for the macOS menu bar (Apple Silicon).\n\n- Tray popover now opens reliably and lands centered under the menu-bar icon — including the first click on each screen in multi-monitor setups (it no longer opens detached on the wrong display).\n\nAd-hoc signed for now: on first launch right-click → Open (or System Settings → Privacy & Security → Open Anyway) until notarization is set up."
 }

@@ -1,4 +1,4 @@
-//! User settings: typed, persisted, live-applied (PLAN Phase 7).
+//! User settings: typed, persisted, live-applied.
 //!
 //! Flat JSON at <Skyward data dir>/settings.json (see paths.rs). Unknown fields
 //! are ignored and missing fields take defaults (serde defaults) — old/new app
@@ -30,7 +30,7 @@ pub struct Settings {
     /// Show all-day events in the tray list (they never alert either way).
     pub show_all_day_in_tray: bool,
     /// Auto-close an unactioned overlay after `auto_close_minutes`.
-    /// Default OFF: hiding an unactioned alarm contradicts "never miss" (PLAN §1).
+    /// Default OFF: hiding an unactioned alarm contradicts "never miss".
     pub auto_close_enabled: bool,
     pub auto_close_minutes: u32,
     pub launch_at_login: bool,
@@ -186,7 +186,7 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.lead_minutes, 5);
         assert_eq!(s.snooze_minutes, vec![1, 5]);
-        assert!(!s.auto_close_enabled, "auto-close defaults OFF (PLAN §1)");
+        assert!(!s.auto_close_enabled, "auto-close defaults OFF");
         assert!(s.alert_tentative && s.alert_pending);
         assert!(s.enabled_calendar_ids.is_none(), "all calendars by default");
         assert_eq!(s.tray_icon, "auto", "tray icon defaults to the adaptive template");

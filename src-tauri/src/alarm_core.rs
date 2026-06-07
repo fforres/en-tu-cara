@@ -1,4 +1,4 @@
-//! Pure alarm decision core (PLAN §1): `compute_actions(events, now, state)`.
+//! Pure alarm decision core: `compute_actions(events, now, state)`.
 //!
 //! Encodes EVERY policy as testable data, no clocks, no EventKit, no UI:
 //!   - T-5m and T-0 alarms per event occurrence
@@ -90,7 +90,7 @@ impl AlarmState {
         // Re-arming a snooze must allow it to fire again.
         self.fired.remove(&fired_key(occurrence_key, AlarmKind::Snooze));
     }
-    /// Drop state for occurrences that ended > 48 h ago (PLAN §1 GC rule).
+    /// Drop state for occurrences that ended > 48 h ago (GC rule).
     /// Keys embed the occurrence; we GC by fired-at age as the proxy.
     pub fn gc(&mut self, now: DateTime<Utc>) {
         let cutoff = now - Duration::hours(48);

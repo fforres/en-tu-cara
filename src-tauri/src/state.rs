@@ -1,4 +1,4 @@
-//! Persisted alarm state: fired-set, snoozes, pause flag (PLAN §1 schema).
+//! Persisted alarm state: fired-set, snoozes, pause flag.
 //! Plain JSON in app_data_dir/state.json — written on every mutation (tiny file),
 //! GC'd on write so it never grows unbounded.
 

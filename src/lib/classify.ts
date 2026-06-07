@@ -1,4 +1,4 @@
-// Event classification + display math for the tray popover (PLAN §2 Phase 2).
+// Event classification + display math for the tray popover.
 // Pure functions over EventDto-shaped data; `now` is always injected (mock-clock
 // discipline — nothing in src/lib may call Date.now() directly).
 

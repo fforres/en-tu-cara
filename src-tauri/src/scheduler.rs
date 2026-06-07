@@ -1,4 +1,4 @@
-//! Alarm scheduler (Phase 1d spike → grows into the production engine, PLAN §1).
+//! Alarm scheduler — the production timing engine.
 //!
 //! Core principles (both verified by adversarial review + Apple docs):
 //!   - Arm against WALL-CLOCK, never duration sleeps: mach timers pause in sleep
@@ -96,7 +96,7 @@ use serde::Deserialize;
 use std::sync::Mutex;
 use tauri::Emitter;
 
-/// Events injected via test-mode IPC override EventKit (PLAN §1 test mode).
+/// Events injected via test-mode IPC override EventKit.
 pub static INJECTED_EVENTS: Mutex<Option<Vec<AlarmEvent>>> = Mutex::new(None);
 
 /// Alarms currently presented in the overlay. The overlay webview boots AFTER
@@ -157,7 +157,7 @@ pub fn inject_events(events: Vec<InjectableEvent>) -> Result<usize, String> {
 
 /// ENTUCARA_TEST_EVENTS='[{"key":"e2e","title":"…","start_in":15,"duration":60}]'
 /// — relative seconds from process launch; lets a shell script drive a full
-/// alarm lifecycle in seconds without webview IPC (PLAN test-mode substitute).
+/// alarm lifecycle in seconds without webview IPC.
 fn env_test_events() -> Option<Vec<AlarmEvent>> {
     use std::sync::OnceLock;
     static PARSED: OnceLock<Option<Vec<AlarmEvent>>> = OnceLock::new();
@@ -199,7 +199,7 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
             return env_events;
         }
     }
-    // Nudge the OS sync daemon, then read (PLAN freshness; user req: ≤1 min cadence).
+    // Nudge the OS sync daemon, then read (freshness; ≤1 min cadence).
     crate::calendar::refresh_sources();
     // EventKit fetch: 1 day back (ongoing events started earlier) + 1 forward.
     crate::calendar::fetch_events(1, 1)
@@ -327,7 +327,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
 /// Spawn the production scheduler loop. Tick cadence ≤30 s (poll backstop —
 /// catches calendar edits and self-heals after sleep: first tick post-wake runs
 /// compute_actions and the fire-if-ongoing policy covers missed alarms).
-/// Holds the latencyCritical assertion only while an alarm is ≤120 s out (PLAN §1).
+/// Holds the latencyCritical assertion only while an alarm is ≤120 s out.
 pub fn spawn_loop(app: &tauri::AppHandle) {
     let app = app.clone();
     std::thread::spawn(move || {

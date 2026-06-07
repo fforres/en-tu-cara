@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { extractMeetingLink } from "./meeting-links";
 
-// Fixture matrix (PLAN §2 CP2): each provider × {url-field, location, notes} +
-// adversarial cases. Bodies modeled on real invite formats (incl. CP1a dump).
+// Fixture matrix: each provider × {url-field, location, notes} +
+// adversarial cases. Bodies modeled on real invite formats.
 
 const zoom = "https://us04web.zoom.us/j/4121166431?pwd=S2J2Yy9mY3ZOdz09";
 const meet = "https://meet.google.com/abc-defg-hij";
