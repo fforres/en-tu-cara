@@ -1,7 +1,7 @@
 //! Test-mode harness: mock clock + fire log.
 //!
 //! tauri-driver does not support macOS, so e2e verification happens through this
-//! debug IPC instead (PLAN §1 "Verification"). Gated on ENTUCARA_TEST_MODE=1 —
+//! debug IPC instead. Gated on ENTUCARA_TEST_MODE=1 —
 //! the commands exist but refuse to act outside test mode.
 //!
 //! The clock is the ONLY time source the app may use. Production code calls
@@ -37,7 +37,7 @@ pub mod clock {
 /// CP1d/CP3 scripts read it back to assert exact timing/sequence.
 #[derive(Debug, Clone, Serialize)]
 pub struct FireRecord {
-    /// Composite occurrence key: "(event_id, occurrence_start)" — PLAN §1.
+    /// Composite occurrence key: "(event_id, occurrence_start)".
     pub key: String,
     /// "t_minus_5" | "t_zero" | "snooze"
     pub kind: String,

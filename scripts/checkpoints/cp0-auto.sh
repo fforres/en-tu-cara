@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# CP0 automated tier (PLAN §2 Phase 0):
+# CP0 automated tier:
 #   build ✓ check ✓ tests ✓ lint ✓ ; packaged app: LSUIElement + calendar usage strings
 #   present in Info.plist ; launch: accessory policy active, frontmost app unchanged.
 # Headless-safe: the launch section runs only when a built .app exists (pass --launch to force build).

@@ -12,10 +12,8 @@ meeting start.
   <img src="docs/evidence/cp7/settings-general.png" width="49%" alt="General settings — start at login" />
 </p>
 
-| Doc                            | What's in it                                                       |
-| ------------------------------ | ------------------------------------------------------------------ |
-| `PLAN.md`                      | Phased build plan, checkpoints, risk register                      |
-| `PROGRESS.md`                  | Current state, passed checkpoints, NEEDS-HUMAN queue, decision log |
+`PLAN.md` has the roadmap (what ships today, what's still pending) and the
+load-bearing constraints. Release flow: `docs/RELEASING.md`.
 
 ## Prerequisites
 
@@ -108,4 +106,5 @@ Identity notes (don't change casually):
 
 - Bundle id `dev.fforres.entucara` — calendar permission is keyed to it.
 - `tauri-nspanel` is pinned to an exact git rev and `eventkit-rs` to `=0.5.6`
-  in `src-tauri/Cargo.toml`; both pins are load-bearing (see PLAN risk register).
+  in `src-tauri/Cargo.toml`; both pins are load-bearing (see the load-bearing
+  constraints in `PLAN.md`).

@@ -5,7 +5,7 @@
 //!
 //! State + settings (state.json, settings.json) live here too, alongside logs/
 //! and exports/ (see lib.rs setup) — moved off the macOS app_data_dir since
-//! there were no existing users to migrate (PROGRESS).
+//! there were no existing users to migrate.
 use std::ffi::OsString;
 use std::path::PathBuf;
 

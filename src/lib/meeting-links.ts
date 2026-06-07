@@ -1,4 +1,4 @@
-// Meeting-link extraction (PLAN §2 Phase 2).
+// Meeting-link extraction.
 //
 // EventKit surfaces the join link wherever the provider stashed it — the URL
 // field, the location string, or buried in the notes (often HTML). We scan all

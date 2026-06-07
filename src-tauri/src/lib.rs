@@ -1,5 +1,5 @@
 //! En Tu Cara — unmissable meeting alerts for macOS. Fully local (EventKit only).
-//! Architecture: PLAN.md §1.
+//! Architecture: see PLAN.md.
 
 mod alarm_core;
 #[cfg(target_os = "macos")]
@@ -141,7 +141,7 @@ pub fn run() {
 
             // Persisted alarm state + settings + the production scheduler loop.
             // Persist state + settings in the Skyward data dir (~/.config/skyward/
-            // en-tu-cara), not ~/Library — no existing users to migrate (PROGRESS).
+            // en-tu-cara), not ~/Library — no existing users to migrate.
             let data_dir = paths::data_dir();
             app.manage(state::SharedState::load(data_dir.clone()));
             let settings_store = settings::SettingsStore::load(data_dir);

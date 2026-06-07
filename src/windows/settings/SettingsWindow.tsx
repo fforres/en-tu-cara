@@ -1,4 +1,4 @@
-// Settings window (PLAN Phase 7.3) — VS Code style: sidebar with fuzzy search +
+// Settings window — VS Code style: sidebar with fuzzy search +
 // section TOC; content renders matching settings with label highlights.
 // Raw macOS styling: system-ui, CSS system colors (opaque normal window — the
 // active/inactive system-color trap only applies to the overlay panels).
