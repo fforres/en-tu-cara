@@ -185,9 +185,19 @@ pub fn apply_tray_icon(app: &AppHandle, style: &str) {
         "dark" => (include_bytes!("../icons/tray-dark.png"), false),
         _ => (include_bytes!("../icons/tray-auto.png"), true),
     };
-    if let (Some(tray), Ok(img)) = (app.tray_by_id("main"), Image::from_bytes(bytes)) {
-        let _ = tray.set_icon(Some(img));
-        let _ = tray.set_icon_as_template(template);
+    match (app.tray_by_id("main"), Image::from_bytes(bytes)) {
+        (Some(tray), Ok(img)) => {
+            let _ = tray.set_icon(Some(img));
+            let _ = tray.set_icon_as_template(template);
+        }
+        // include_bytes! is compile-time, so a decode failure is a build bug, and
+        // a missing tray means we were called before setup — surface both rather
+        // than silently keeping the wrong (or no) glyph.
+        (tray, img) => log::warn!(
+            "apply_tray_icon('{style}') skipped: tray present={}, image ok={}",
+            tray.is_some(),
+            img.is_ok()
+        ),
     }
 }
 

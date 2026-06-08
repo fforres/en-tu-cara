@@ -99,6 +99,20 @@ impl AlarmState {
     }
 }
 
+/// The instant T-0 (and a due snooze) stop being eligible for an event.
+/// Normally the event's end. But a zero- or negative-duration event (a 0-minute
+/// calendar block / milestone, where `start == end`) could otherwise NEVER get a
+/// T-0: `now < end` is unsatisfiable once `now >= start`. Give only those a 60s
+/// grace so "your meeting is starting" still fires; positive-duration events keep
+/// their exact end so none of their behavior changes.
+fn t0_window_end(event: &AlarmEvent) -> DateTime<Utc> {
+    if event.end > event.start {
+        event.end
+    } else {
+        event.start + Duration::seconds(60)
+    }
+}
+
 fn alertable(event: &AlarmEvent, cfg: &AlarmConfig) -> bool {
     if event.all_day || event.status == "canceled" {
         return false;
@@ -144,7 +158,7 @@ pub fn compute_actions(
         // T-0: due, not fired, event still ongoing (missed-while-asleep policy:
         // fire on the first tick after wake while ongoing; never after it ended).
         if now >= event.start
-            && now < event.end
+            && now < t0_window_end(event)
             && !state.has_fired(&event.occurrence_key, AlarmKind::TZero)
         {
             actions.push(FireAction {
@@ -160,7 +174,7 @@ pub fn compute_actions(
     for (key, until) in &state.snoozes {
         if now >= *until && !state.has_fired(key, AlarmKind::Snooze) {
             if let Some(event) = events.iter().find(|e| &e.occurrence_key == key) {
-                if now < event.end && alertable(event, cfg) {
+                if now < t0_window_end(event) && alertable(event, cfg) {
                     actions.push(FireAction {
                         occurrence_key: key.clone(),
                         kind: AlarmKind::Snooze,
@@ -401,6 +415,35 @@ mod tests {
         let state = AlarmState::default();
         let actions = compute_actions(&[no_link, with_link], t(400), &state, &only_video);
         assert_eq!(kinds(&actions), vec![("link".into(), AlarmKind::TZero)]);
+    }
+
+    #[test]
+    fn zero_duration_event_still_gets_t0() {
+        // A 0-minute calendar block (start == end): the old `now < end` made T-0
+        // unreachable. The grace window fires "starting now" instead.
+        let events = vec![ev("point", 300, 300)];
+        let mut state = AlarmState::default();
+        let at_t5 = compute_actions(&events, t(0), &state, &cfg());
+        assert_eq!(kinds(&at_t5), vec![("point".into(), AlarmKind::TMinus5)], "T-5 still works");
+        state.mark_fired("point", AlarmKind::TMinus5, t(0));
+        let at_t0 = compute_actions(&events, t(300), &state, &cfg());
+        assert_eq!(kinds(&at_t0), vec![("point".into(), AlarmKind::TZero)], "T-0 fires despite 0 duration");
+        state.mark_fired("point", AlarmKind::TZero, t(300));
+        assert!(
+            compute_actions(&events, t(400), &state, &cfg()).is_empty(),
+            "no longer eligible past the grace"
+        );
+    }
+
+    #[test]
+    fn positive_duration_t0_window_is_unchanged() {
+        // A short (30s) but non-zero event keeps its EXACT window — grace applies
+        // only to zero/negative-duration events.
+        let events = vec![ev("short", 0, 30)];
+        let state = AlarmState::default();
+        assert_eq!(t0_window_end(&events[0]), t(30), "positive duration → end unchanged");
+        // Past its real end it must not fire (grace must not leak in).
+        assert!(compute_actions(&events, t(45), &state, &cfg()).is_empty());
     }
 
     #[test]

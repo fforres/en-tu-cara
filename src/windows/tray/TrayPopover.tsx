@@ -195,15 +195,40 @@ export function TrayPopover() {
   }, []);
 
   useEffect(() => {
-    void refresh();
-    const data = setInterval(() => void refresh(), 30_000); // poll backstop
-    const clock = setInterval(() => setNow(new Date()), 15_000);
-    const onFocus = () => void refresh(); // popover shown → instant freshness
-    window.addEventListener("focus", onFocus);
+    // The popover is the always-loaded host window; it's hidden ~99% of the
+    // time. Only poll EventKit + tick the countdown clock while it's actually on
+    // screen — otherwise a menu-bar app idle in the tray burns battery doing 3
+    // IPC round-trips every 30s and a full re-render every 15s for no viewer.
+    let data: ReturnType<typeof setInterval> | null = null;
+    let clock: ReturnType<typeof setInterval> | null = null;
+    const start = () => {
+      void refresh(); // shown → instant freshness
+      setNow(new Date());
+      data ??= setInterval(() => void refresh(), 30_000); // poll backstop
+      clock ??= setInterval(() => setNow(new Date()), 15_000);
+    };
+    const stop = () => {
+      if (data !== null) {
+        clearInterval(data);
+        data = null;
+      }
+      if (clock !== null) {
+        clearInterval(clock);
+        clock = null;
+      }
+    };
+    // Focus/blur is the reliable signal for a dismiss-on-blur popover.
+    const sync = () =>
+      document.visibilityState === "visible" || document.hasFocus() ? start() : stop();
+    sync();
+    window.addEventListener("focus", start);
+    window.addEventListener("blur", stop);
+    document.addEventListener("visibilitychange", sync);
     return () => {
-      clearInterval(data);
-      clearInterval(clock);
-      window.removeEventListener("focus", onFocus);
+      stop();
+      window.removeEventListener("focus", start);
+      window.removeEventListener("blur", stop);
+      document.removeEventListener("visibilitychange", sync);
     };
   }, [refresh]);
 
@@ -258,8 +283,13 @@ export function TrayPopover() {
           <button
             title={paused ? "Resume alerts" : "Pause alerts"}
             onClick={async () => {
-              await invoke("set_paused", { paused: !paused });
-              setPaused(!paused);
+              const next = !paused;
+              try {
+                await invoke("set_paused", { paused: next });
+                setPaused(next); // state follows the backend, not the other way
+              } catch (e) {
+                setError(String(e));
+              }
             }}
             style={{ border: "none", background: "none", cursor: "pointer", fontSize: 14 }}
           >

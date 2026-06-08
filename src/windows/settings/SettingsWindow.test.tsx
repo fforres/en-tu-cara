@@ -109,6 +109,24 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("clears a stale error banner once a later save succeeds", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Event Filters" }));
+    const toggle = () =>
+      fireEvent.click(screen.getByRole("switch", { name: "Only events with a video link" }));
+
+    // First save fails → error banner appears.
+    invokeMock.mockImplementationOnce((cmd: string) =>
+      cmd === "set_settings" ? Promise.reject("disk full") : Promise.resolve(undefined),
+    );
+    toggle();
+    expect(await screen.findByText("disk full")).toBeInTheDocument();
+
+    // A subsequent successful save must clear it (was sticky before).
+    toggle();
+    await waitFor(() => expect(screen.queryByText("disk full")).not.toBeInTheDocument());
+  });
+
   it("calendar list groups by account; unchecking one stores the remaining ids", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Calendars" }));

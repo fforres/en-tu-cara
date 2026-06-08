@@ -103,9 +103,17 @@ pub static INJECTED_EVENTS: Mutex<Option<Vec<AlarmEvent>>> = Mutex::new(None);
 /// the fire emit, so it pulls these on mount (and also listens for later emits).
 pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 
+/// Lock a mutex, recovering the guard even if a prior holder panicked. The alarm
+/// path must degrade to "keep going" on a poisoned lock, never "panic forever":
+/// a poisoned scheduler mutex would otherwise make every subsequent `.lock()`
+/// panic and silently kill all future alarms — the one unforgivable failure.
+fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[tauri::command]
 pub fn get_active_alarms() -> Vec<serde_json::Value> {
-    ACTIVE_ALARMS.lock().unwrap().clone()
+    lock_resilient(&ACTIVE_ALARMS).clone()
 }
 
 #[derive(Debug, Deserialize)]
@@ -151,7 +159,7 @@ pub fn inject_events(events: Vec<InjectableEvent>) -> Result<usize, String> {
         .collect();
     let parsed = parsed?;
     let n = parsed.len();
-    *INJECTED_EVENTS.lock().unwrap() = Some(parsed);
+    *lock_resilient(&INJECTED_EVENTS) = Some(parsed);
     Ok(n)
 }
 
@@ -191,7 +199,7 @@ fn env_test_events() -> Option<Vec<AlarmEvent>> {
 }
 
 fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent> {
-    if let Some(injected) = INJECTED_EVENTS.lock().unwrap().clone() {
+    if let Some(injected) = lock_resilient(&INJECTED_EVENTS).clone() {
         return injected;
     }
     if crate::testmode::is_test_mode() {
@@ -201,8 +209,11 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
     }
     // Nudge the OS sync daemon, then read (freshness; ≤1 min cadence).
     crate::calendar::refresh_sources();
-    // EventKit fetch: 1 day back (ongoing events started earlier) + 1 forward.
-    crate::calendar::fetch_events(1, 1)
+    // EventKit fetch: 1 day back (ongoing events started earlier) + 2 forward.
+    // The forward window is 2 days, not 1, so a DST "spring forward" day (a 23h
+    // wall-clock day) can never clip the next 24h of events out of the query.
+    // Over-fetching is free — compute_actions filters by time.
+    crate::calendar::fetch_events(1, 2)
         .unwrap_or_default()
         .into_iter()
         .filter(|e| match (&settings.enabled_calendar_ids, &e.calendar_id) {
@@ -243,12 +254,11 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     let state = app.state::<SharedState>();
 
     let actions = {
-        let alarms = state.alarms.lock().unwrap();
+        let alarms = lock_resilient(&state.alarms);
         compute_actions(&events, now, &alarms, &cfg)
     };
 
     for action in &actions {
-        state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
         crate::testmode::log_fire(
             &action.occurrence_key,
             match action.kind {
@@ -258,7 +268,10 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             },
             action.due_at,
         );
+        // Suppressed actions carry no overlay (dedup/policy) — record them fired
+        // so they aren't reconsidered, and move on.
         if action.suppressed {
+            state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
             continue;
         }
         let event = events.iter().find(|e| e.occurrence_key == action.occurrence_key);
@@ -269,19 +282,44 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             "start": event.map(|e| e.start.to_rfc3339()),
             "end": event.map(|e| e.end.to_rfc3339()),
         });
-        ACTIVE_ALARMS.lock().unwrap().push(payload.clone());
+
+        // Show the overlay on the main thread and WAIT for the outcome. We mark
+        // the alarm fired ONLY once the overlay is confirmed up — otherwise a
+        // failed show would advance the fired-set and the alert would be
+        // swallowed forever with no retry (the unforgivable failure). Waiting
+        // synchronously here is safe: the next tick can't begin until this one
+        // returns, so there is no window for a double-fire. On failure/timeout we
+        // leave the alarm unmarked and the next tick retries it.
+        let (tx, rx) = std::sync::mpsc::channel();
         let handle = app.clone();
+        let shown_payload = payload.clone();
         let _ = app.run_on_main_thread(move || {
-            match crate::overlay::show_overlays(&handle) {
-                // Sound: show_overlays starts the recurring alert loop itself.
-                Ok(_) => {
-                    // Already-booted overlay windows get the push; freshly created
-                    // ones pull via get_active_alarms on mount.
-                    let _ = handle.emit("alarm-fired", &payload);
-                }
-                Err(e) => eprintln!("overlay failed: {e}"),
+            let result = crate::overlay::show_overlays(&handle);
+            if result.is_ok() {
+                // Already-booted overlay windows get the push; freshly created
+                // ones pull via get_active_alarms on mount.
+                lock_resilient(&ACTIVE_ALARMS).push(shown_payload.clone());
+                let _ = handle.emit("alarm-fired", &shown_payload);
             }
+            let _ = tx.send(result.map(|_| ()).map_err(|e| e.to_string()));
         });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(Ok(())) => {
+                state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
+            }
+            Ok(Err(e)) => {
+                log::error!(
+                    "overlay show failed for {}: {e}; leaving unmarked to retry next tick",
+                    action.occurrence_key
+                );
+            }
+            Err(_) => {
+                log::error!(
+                    "overlay show timed out for {}; leaving unmarked to retry next tick",
+                    action.occurrence_key
+                );
+            }
+        }
     }
 
     // Menu-bar next-event title (user req): "Title… · 12m". Cleared when disabled
@@ -317,7 +355,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     }
 
     // Wall-clock arming: wake at the next due alarm (capped) or the poll backstop.
-    let alarms = state.alarms.lock().unwrap();
+    let alarms = lock_resilient(&state.alarms);
     match next_due(&events, now, &alarms, &cfg) {
         Some(due) => ((due - now).num_seconds().clamp(1, 30)) as u64,
         None => 30,
@@ -337,7 +375,17 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         // from firing in the first 2 s of its life.
         std::thread::sleep(Duration::from_secs(2));
         loop {
-        let sleep_secs = tick(&app);
+        // A panic inside one tick must NEVER permanently kill the scheduler: a
+        // dead loop thread = no alarm ever fires again, silently. Catch it, log,
+        // back off briefly, and keep ticking — losing one tick self-heals on the
+        // next pass (compute_actions re-runs), losing the thread does not.
+        let sleep_secs = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(&app))) {
+            Ok(secs) => secs,
+            Err(_) => {
+                log::error!("scheduler tick panicked; backing off 5s and continuing");
+                5
+            }
+        };
 
         // Windowed precision assertion: close-in alarms get latencyCritical.
         if sleep_secs <= 120 {
@@ -360,12 +408,12 @@ pub fn demo_alert(app: tauri::AppHandle) {
     let now = crate::testmode::clock::now();
     let payload = serde_json::json!({
         "occurrence_key": "(demo @ now)",
-        "kind": "t_minus5",
+        "kind": "t_minus_5",
         "title": "Hello, I'm a demo event",
         "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
         "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
     });
-    ACTIVE_ALARMS.lock().unwrap().push(payload.clone());
+    lock_resilient(&ACTIVE_ALARMS).push(payload.clone());
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
         match crate::overlay::show_overlays(&handle) {
@@ -377,19 +425,57 @@ pub fn demo_alert(app: tauri::AppHandle) {
     });
 }
 
+/// The active-alarm payloads NOT belonging to `occurrence_key`. Pure over the
+/// payload vec so the per-occurrence isolation is unit-testable.
+fn retain_other_occurrences(
+    active: &[serde_json::Value],
+    occurrence_key: &str,
+) -> Vec<serde_json::Value> {
+    active
+        .iter()
+        .filter(|p| p.get("occurrence_key").and_then(|v| v.as_str()) != Some(occurrence_key))
+        .cloned()
+        .collect()
+}
+
+/// Finish ONE occurrence: drop its card(s) from the active set, then close the
+/// overlay only if nothing remains — otherwise tell the still-open overlay to
+/// re-render the reduced set. This is what lets two overlapping meetings be
+/// actioned independently: dismissing/snoozing one must never silently take the
+/// other down with it (the old code cleared ALL active alarms on any action).
+fn finish_one(app: &tauri::AppHandle, occurrence_key: &str) {
+    let remaining = {
+        let mut active = lock_resilient(&ACTIVE_ALARMS);
+        *active = retain_other_occurrences(&active, occurrence_key);
+        active.clone()
+    };
+    if remaining.is_empty() {
+        crate::overlay::close_overlays(app.clone());
+    } else {
+        let _ = app.emit("alarms-updated", remaining);
+    }
+}
+
 #[tauri::command]
 pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64) {
     let state = app.state::<SharedState>();
     let until = crate::testmode::clock::now() + ChronoDuration::minutes(minutes);
     state.update(|a| a.snooze(&occurrence_key, until));
-    ACTIVE_ALARMS.lock().unwrap().clear();
-    crate::overlay::close_overlays(app.clone());
+    finish_one(&app, &occurrence_key);
 }
 
+/// Dismiss ONE occurrence (when `occurrence_key` is supplied by a card button) or
+/// ALL active alarms (Esc and the zero-card safety Dismiss pass nothing).
+/// Dismiss-all stays the blunt "get everything off my screen" escape hatch.
 #[tauri::command]
-pub fn dismiss_alarms(app: tauri::AppHandle) {
-    ACTIVE_ALARMS.lock().unwrap().clear();
-    crate::overlay::close_overlays(app);
+pub fn dismiss_alarms(app: tauri::AppHandle, occurrence_key: Option<String>) {
+    match occurrence_key {
+        Some(key) => finish_one(&app, &key),
+        None => {
+            lock_resilient(&ACTIVE_ALARMS).clear();
+            crate::overlay::close_overlays(app);
+        }
+    }
 }
 
 #[tauri::command]
@@ -401,7 +487,7 @@ pub fn set_paused(app: tauri::AppHandle, paused: bool) {
 #[tauri::command]
 pub fn get_paused(app: tauri::AppHandle) -> bool {
     let state = app.state::<SharedState>();
-    let paused = state.alarms.lock().unwrap().paused;
+    let paused = lock_resilient(&state.alarms).paused;
     paused
 }
 
@@ -468,6 +554,66 @@ pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
         }
         app.exit(0);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lock_resilient_recovers_from_poison() {
+        let m: Mutex<i32> = Mutex::new(7);
+        // Poison it the way a real panic-under-lock would.
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = m.lock().unwrap();
+            panic!("boom while holding the alarm lock");
+        }));
+        assert!(m.lock().is_err(), "lock should be poisoned by the panic");
+        // The alarm path must still recover the guard + value, never panic.
+        assert_eq!(*lock_resilient(&m), 7);
+    }
+
+    #[test]
+    fn loop_guard_survives_a_panicking_tick() {
+        // Mirrors spawn_loop's catch_unwind guard: a panicking iteration is
+        // caught and the loop keeps running instead of the thread dying forever.
+        let mut completed = 0;
+        for i in 0..4 {
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                if i == 1 {
+                    panic!("tick boom");
+                }
+                i
+            }));
+            if r.is_ok() {
+                completed += 1;
+            }
+        }
+        assert_eq!(completed, 3, "every non-panicking tick ran despite the panic at i==1");
+    }
+
+    #[test]
+    fn dismissing_one_occurrence_keeps_the_other() {
+        // Two overlapping meetings on screen, meeting A with both T-5 and T-0
+        // cards. Dismissing A must drop BOTH A cards and leave B untouched.
+        let active = vec![
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
+            serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
+        ];
+        let remaining = retain_other_occurrences(&active, "(A @ t)");
+        assert_eq!(remaining.len(), 1, "only B should remain after dismissing A");
+        assert_eq!(remaining[0]["occurrence_key"], "(B @ t)");
+    }
+
+    #[test]
+    fn dismissing_the_only_occurrence_empties_the_set() {
+        let active = vec![serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"})];
+        assert!(
+            retain_other_occurrences(&active, "(A @ t)").is_empty(),
+            "removing the last occurrence empties the set so the overlay closes"
+        );
+    }
 }
 
 use tauri::Manager;

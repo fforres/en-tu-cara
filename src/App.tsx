@@ -18,8 +18,7 @@ export default function App() {
   if (kind === "onboarding") {
     return <OnboardingWindow />;
   }
-  if (kind === "popover") {
-    return <TrayPopover />;
-  }
-  return null;
+  // Default (no/unknown param) → the tray popover, matching how the Rust side
+  // opens it and the documented routing in src/CLAUDE.md.
+  return <TrayPopover />;
 }

@@ -106,7 +106,7 @@ export function OnboardingWindow() {
     setLogin(on);
     invoke<Record<string, unknown>>("get_settings")
       .then((s) => invoke("set_settings", { settings: { ...s, launch_at_login: on } }))
-      .catch(() => {});
+      .catch(() => setLogin(!on)); // keep the toggle honest if the write fails
   }, []);
 
   return (
@@ -162,14 +162,14 @@ export function OnboardingWindow() {
             aria-label="Start at login"
             checked={login}
             onChange={(e) => toggleLogin(e.target.checked)}
-            style={{ width: 18, height: 18, accentColor: "Highlight" }}
+            style={{ width: 18, height: 18, accentColor: "AccentColor" }}
           />
         </div>
       </div>
 
       <div style={{ marginTop: "auto", display: "flex", justifyContent: "flex-end" }}>
         <button
-          onClick={() => void invoke("finish_onboarding")}
+          onClick={() => void invoke("finish_onboarding").catch((e) => console.error(e))}
           style={{
             font: "inherit",
             fontWeight: 600,

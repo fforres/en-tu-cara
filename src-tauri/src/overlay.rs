@@ -92,7 +92,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
                 panel.order_front_regardless();
             }
         }
-        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if let Ok(panel) = app.get_webview_panel(main_label) {
                 panel.show_and_make_key();
             }
@@ -145,7 +145,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .build()?;
 
         let panel = if is_primary {
-            *MAIN_OVERLAY.lock().unwrap() = Some(label.clone());
+            *MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(label.clone());
             window.to_panel::<OverlayPanel>()?
         } else {
             window.to_panel::<DimPanel>()?
@@ -178,7 +178,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     // Autofocus the principal display: the main panel takes key status so Esc /
     // Enter work immediately. Nonactivating style means the APP still doesn't
     // activate — focus-of-record stays with whatever the user was using.
-    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if let Ok(panel) = app.get_webview_panel(main_label) {
             panel.show_and_make_key();
         }

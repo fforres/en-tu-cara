@@ -27,38 +27,41 @@ export type Provider =
 // Order matters: first match wins within a field. Specific providers before
 // the generic catch-all. Patterns anchored to provider domains, tolerant of
 // subdomains (us04web.zoom.us, company.webex.com) and query strings (?pwd=…).
+// Patterns use `i` only — NOT `g`. We take just the first match per field, and
+// the global flag makes `.exec()` stateful via `lastIndex`, a footgun on shared
+// module-level RegExps. Without `g` no `lastIndex` reset is needed.
 const PROVIDER_PATTERNS: Array<{ provider: Provider; pattern: RegExp }> = [
   // zoom.us/j/<id>, zoom.us/my/<room>, zoom.us/w/<id>, zoomgov.com
   {
     provider: "zoom",
     pattern:
-      /https?:\/\/[\w.-]*zoom(?:gov)?\.(?:us|com)\/(?:[a-z]+\/)?(?:j|my|w|s)\/[^\s<>"')\]]+/gi,
+      /https?:\/\/[\w.-]*zoom(?:gov)?\.(?:us|com)\/(?:[a-z]+\/)?(?:j|my|w|s)\/[^\s<>"')\]]+/i,
   },
   {
     provider: "meet",
-    pattern: /https?:\/\/meet\.google\.com\/[a-z]{3}-?[a-z]{4}-?[a-z]{3}(?:\?[^\s<>"')\]]*)?/gi,
+    pattern: /https?:\/\/meet\.google\.com\/[a-z]{3}-?[a-z]{4}-?[a-z]{3}(?:\?[^\s<>"')\]]*)?/i,
   },
   // teams.microsoft.com/l/meetup-join/… and teams.live.com
   {
     provider: "teams",
-    pattern: /https?:\/\/teams\.(?:microsoft|live)\.com\/(?:l\/meetup-join|meet)\/[^\s<>"')\]]+/gi,
+    pattern: /https?:\/\/teams\.(?:microsoft|live)\.com\/(?:l\/meetup-join|meet)\/[^\s<>"')\]]+/i,
   },
   {
     provider: "webex",
-    pattern: /https?:\/\/[\w.-]+\.webex\.com\/(?:meet|join|[\w-]+\/j\.php)[^\s<>"')\]]*/gi,
+    pattern: /https?:\/\/[\w.-]+\.webex\.com\/(?:meet|join|[\w-]+\/j\.php)[^\s<>"')\]]*/i,
   },
-  { provider: "jitsi", pattern: /https?:\/\/meet\.jit\.si\/[^\s<>"')\]]+/gi },
-  { provider: "whereby", pattern: /https?:\/\/whereby\.com\/[^\s<>"')\]]+/gi },
-  { provider: "around", pattern: /https?:\/\/(?:meet\.)?around\.co\/[^\s<>"')\]]+/gi },
+  { provider: "jitsi", pattern: /https?:\/\/meet\.jit\.si\/[^\s<>"')\]]+/i },
+  { provider: "whereby", pattern: /https?:\/\/whereby\.com\/[^\s<>"')\]]+/i },
+  { provider: "around", pattern: /https?:\/\/(?:meet\.)?around\.co\/[^\s<>"')\]]+/i },
   {
     provider: "discord",
-    pattern: /https?:\/\/discord(?:\.gg|(?:app)?\.com\/channels)\/[^\s<>"')\]]+/gi,
+    pattern: /https?:\/\/discord(?:\.gg|(?:app)?\.com\/channels)\/[^\s<>"')\]]+/i,
   },
 ];
 
 // Generic fallback for self-hosted/unknown services (e.g. meet.bman.dev from the
 // tray reference): any URL whose host or path smells like a meeting.
-const GENERIC_PATTERN = /https?:\/\/[\w.-]*(?:meet|call|video|huddle)[\w.-]*\/[^\s<>"')\]]+/gi;
+const GENERIC_PATTERN = /https?:\/\/[\w.-]*(?:meet|call|video|huddle)[\w.-]*\/[^\s<>"')\]]+/i;
 
 /** Strip trailing punctuation that regexes drag in from prose/HTML contexts. */
 function cleanUrl(raw: string): string {
@@ -67,13 +70,11 @@ function cleanUrl(raw: string): string {
 
 function scanField(text: string, source: MeetingLink["source"]): MeetingLink | null {
   for (const { provider, pattern } of PROVIDER_PATTERNS) {
-    pattern.lastIndex = 0;
     const match = pattern.exec(text);
     if (match) {
       return { url: cleanUrl(match[0]), provider, source };
     }
   }
-  GENERIC_PATTERN.lastIndex = 0;
   const generic = GENERIC_PATTERN.exec(text);
   if (generic) {
     return { url: cleanUrl(generic[0]), provider: "generic", source };

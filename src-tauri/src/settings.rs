@@ -47,6 +47,25 @@ pub struct Settings {
     pub onboarded: bool,
 }
 
+impl Settings {
+    /// Clamp/repair values arriving from the UI — the trust boundary in a local
+    /// app with no server. Out-of-range input must never break alerting or leave
+    /// an empty snooze row. Pure (no I/O) so it's unit-testable; `alert_sound` is
+    /// validated separately against the real system list in `set_settings`.
+    fn sanitized(mut self) -> Self {
+        self.sound_repeat_secs = self.sound_repeat_secs.max(2);
+        self.lead_minutes = self.lead_minutes.min(120);
+        self.auto_close_minutes = self.auto_close_minutes.clamp(1, 24 * 60);
+        self.menu_bar_title_chars = self.menu_bar_title_chars.clamp(4, 60);
+        self.snooze_minutes.retain(|&m| m >= 1);
+        self.snooze_minutes.truncate(4);
+        if self.snooze_minutes.is_empty() {
+            self.snooze_minutes = Settings::default().snooze_minutes;
+        }
+        self
+    }
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -79,25 +98,19 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn load(dir: PathBuf) -> Self {
         let path = dir.join("settings.json");
-        let current = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
+        let current = crate::paths::load_json_or_default(&path);
         Self { current: Mutex::new(current), path }
     }
 
     pub fn get(&self) -> Settings {
-        self.current.lock().unwrap().clone()
+        self.current.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     pub fn update<R>(&self, f: impl FnOnce(&mut Settings) -> R) -> R {
-        let mut guard = self.current.lock().unwrap();
+        let mut guard = self.current.lock().unwrap_or_else(|e| e.into_inner());
         let result = f(&mut guard);
-        if let Some(parent) = self.path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
         if let Ok(json) = serde_json::to_vec_pretty(&*guard) {
-            let _ = std::fs::write(&self.path, json);
+            let _ = crate::paths::atomic_write(&self.path, &json);
         }
         result
     }
@@ -120,13 +133,27 @@ pub fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), Str
     use tauri::Manager;
     let store = app.state::<SettingsStore>();
     let previous = store.get();
-    store.update(|s| *s = settings.clone());
+    #[cfg_attr(not(target_os = "macos"), allow(unused_mut))]
+    let mut next = settings.sanitized();
 
-    // Live-apply: launch at login.
+    // Validate alert_sound against the real system list: persisting a name no
+    // sound file matches would make the ALARM ITSELF silent (a missed alert).
     #[cfg(target_os = "macos")]
-    if previous.launch_at_login != settings.launch_at_login && !crate::testmode::is_test_mode() {
+    {
+        let available = list_system_sounds();
+        if !available.is_empty() && !available.contains(&next.alert_sound) {
+            next.alert_sound = Settings::default().alert_sound;
+        }
+    }
+
+    // Apply OS side effects FIRST and bail on failure, so we never persist a
+    // launch-at-login value that disagrees with the actual login-item state
+    // (the old order wrote disk first, then could fail — UI, disk, and OS all
+    // ended up out of sync).
+    #[cfg(target_os = "macos")]
+    if previous.launch_at_login != next.launch_at_login && !crate::testmode::is_test_mode() {
         use tauri_plugin_autostart::ManagerExt as _;
-        let result = if settings.launch_at_login {
+        let result = if next.launch_at_login {
             app.autolaunch().enable()
         } else {
             app.autolaunch().disable()
@@ -136,9 +163,13 @@ pub fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), Str
         }
     }
 
-    // Live-apply: swap the menu-bar icon style immediately (no restart).
-    if previous.tray_icon != settings.tray_icon {
-        crate::tray::apply_tray_icon(&app, &settings.tray_icon);
+    // Side effects succeeded — now persist the sanitized settings.
+    store.update(|s| *s = next.clone());
+
+    // Live-apply: swap the menu-bar icon style immediately (no restart). This is
+    // best-effort and can't fail loudly, so it runs after persisting.
+    if previous.tray_icon != next.tray_icon {
+        crate::tray::apply_tray_icon(&app, &next.tray_icon);
     }
     Ok(())
 }
@@ -213,6 +244,41 @@ mod tests {
             serde_json::from_str(r#"{"lead_minutes": 9, "some_future_field": true}"#).unwrap();
         assert_eq!(parsed.lead_minutes, 9);
         assert_eq!(parsed.alert_sound, "Sosumi");
+    }
+
+    #[test]
+    fn sanitized_clamps_out_of_range_and_repairs_empty_snooze() {
+        let bad = Settings {
+            sound_repeat_secs: 0,    // would mean "spam continuously"
+            lead_minutes: 9999,      // absurd early-alert horizon
+            auto_close_minutes: 0,   // would auto-close instantly
+            menu_bar_title_chars: 1, // truncates the title to nothing
+            snooze_minutes: vec![],  // empty → no snooze buttons render
+            ..Settings::default()
+        };
+        let s = bad.sanitized();
+        assert!(s.sound_repeat_secs >= 2, "sound repeat clamped to a sane floor");
+        assert!(s.lead_minutes <= 120, "lead minutes bounded");
+        assert!(s.auto_close_minutes >= 1, "auto-close minutes has a floor");
+        assert!(s.menu_bar_title_chars >= 4, "title chars floored so titles stay legible");
+        assert_eq!(s.snooze_minutes, vec![1, 5], "empty snooze list repaired to defaults");
+    }
+
+    #[test]
+    fn sanitized_drops_zero_snoozes_and_caps_count() {
+        let s = Settings {
+            snooze_minutes: vec![0, 1, 2, 3, 5, 10], // a 0 and too many
+            ..Settings::default()
+        }
+        .sanitized();
+        assert!(!s.snooze_minutes.contains(&0), "0-minute snooze removed");
+        assert!(s.snooze_minutes.len() <= 4, "snooze list capped");
+    }
+
+    #[test]
+    fn sanitized_leaves_good_settings_untouched() {
+        let good = Settings::default();
+        assert_eq!(good.clone().sanitized(), good, "valid defaults pass through unchanged");
     }
 
     #[test]

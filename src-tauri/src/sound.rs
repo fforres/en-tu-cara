@@ -39,7 +39,15 @@ pub fn start_alert_loop(app: &tauri::AppHandle) {
             // Read per-iteration: sound/interval changes live-apply mid-alarm.
             let settings = app.state::<crate::settings::SettingsStore>().get();
             let name = settings.alert_sound.clone();
-            let _ = app.run_on_main_thread(move || play(&name));
+            // Re-check on the main thread before playing: a dismiss between the
+            // while-check above and this closure running must NOT emit one last
+            // beat after the overlay is already gone ("stops the instant they're
+            // dismissed").
+            let _ = app.run_on_main_thread(move || {
+                if ALERTING.load(Ordering::SeqCst) {
+                    play(&name);
+                }
+            });
             std::thread::sleep(std::time::Duration::from_secs(settings.sound_repeat_secs.max(2)));
         }
     });
