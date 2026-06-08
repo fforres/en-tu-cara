@@ -150,8 +150,13 @@ pub fn set_settings(app: tauri::AppHandle, settings: Settings) -> Result<(), Str
     // launch-at-login value that disagrees with the actual login-item state
     // (the old order wrote disk first, then could fail — UI, disk, and OS all
     // ended up out of sync).
+    // `!cfg!(debug_assertions)`: never register a dev binary as a login item (it
+    // would spawn a duplicate that fights the single-instance lock). Release only.
     #[cfg(target_os = "macos")]
-    if previous.launch_at_login != next.launch_at_login && !crate::testmode::is_test_mode() {
+    if previous.launch_at_login != next.launch_at_login
+        && !crate::testmode::is_test_mode()
+        && !cfg!(debug_assertions)
+    {
         use tauri_plugin_autostart::ManagerExt as _;
         let result = if next.launch_at_login {
             app.autolaunch().enable()

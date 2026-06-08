@@ -163,6 +163,20 @@ mod tests {
     }
 
     #[test]
+    fn guard_eventkit_contains_a_panic_as_err() {
+        // The whole point: an EventKit NULL-panic must become an Err, never an
+        // unwind into the scheduler tick or a Tauri command handler.
+        let ok: Result<i32, String> = guard_eventkit("x", || Ok::<_, String>(5));
+        assert_eq!(ok, Ok(5));
+        let err: Result<i32, String> = guard_eventkit("x", || Err::<i32, String>("nope".into()));
+        assert_eq!(err, Err("nope".to_string()));
+        let panicked: Result<i32, String> =
+            guard_eventkit("probe", || -> Result<i32, String> { panic!("unexpected NULL") });
+        assert!(panicked.is_err());
+        assert!(panicked.unwrap_err().contains("probe"));
+    }
+
+    #[test]
     fn dedup_prefers_row_with_my_rsvp() {
         // CP1a real-data case: same meeting via a colleague's subscribed calendar
         // (no rsvp) and via the user's own calendar (rsvp present).
@@ -232,16 +246,34 @@ pub fn request_calendar_access() -> Result<bool, String> {
     mgr.request_access().map_err(|e| e.to_string())
 }
 
+/// Run an EventKit query that may PANIC rather than error. `eventkit-rs` /
+/// `objc2-event-kit` panic when an EventKit call returns NULL — which happens
+/// when the process isn't truly calendar-authorized even though
+/// `authorization_status` reports access (notably a bare `tauri dev` binary
+/// whose code identity holds no TCC grant — see gotcha #5). Containing the
+/// unwind here is load-bearing: this same code runs both on the scheduler tick
+/// AND, via `invoke`, on the Tauri command thread for the tray popover — an
+/// unguarded panic there tears down the popover (and starves the UI) instead of
+/// degrading to "no events".
+fn guard_eventkit<T, E: std::fmt::Display>(
+    what: &str,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "{what}: EventKit returned no data — calendar access is unavailable to this process"
+        )),
+    }
+}
+
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let mgr = EventsManager::new();
     mgr.ensure_authorized().map_err(|e| e.to_string())?;
-    Ok(mgr
-        .list_calendars()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(calendar_dto)
-        .collect())
+    let calendars = guard_eventkit("list_calendars", || mgr.list_calendars())?;
+    Ok(calendars.iter().map(calendar_dto).collect())
 }
 
 #[tauri::command]
@@ -249,13 +281,13 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
     let mgr = EventsManager::new();
     mgr.ensure_authorized().map_err(|e| e.to_string())?;
     let now = Local::now();
-    let events = mgr
-        .fetch_events(
+    let events = guard_eventkit("fetch_events", || {
+        mgr.fetch_events(
             now - Duration::days(days_back),
             now + Duration::days(days_forward),
             None,
         )
-        .map_err(|e| e.to_string())?;
+    })?;
     Ok(dedup_events(events.iter().map(event_dto).collect()))
 }
 

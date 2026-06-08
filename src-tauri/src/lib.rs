@@ -152,8 +152,14 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 
-            // Launch at login per settings (default on). Skipped in test mode so
-            // e2e runs don't register the dev binary as a login item.
+            // Launch at login per settings (default on). Skipped in test mode AND
+            // in ALL debug builds: a dev binary must never register a LaunchAgent
+            // pointing at target/debug/en-tu-cara. Enabling autostart loads that
+            // agent (RunAtLoad=true), which immediately spawns a SECOND copy of the
+            // dev binary; it loses the single-instance race and exits, so the tray
+            // flickers up and the app "closes on its own". Only the packaged release
+            // build manages autostart.
+            #[cfg(not(debug_assertions))]
             if !testmode::is_test_mode() {
                 use tauri_plugin_autostart::ManagerExt as _;
                 let wanted = app.state::<settings::SettingsStore>().get().launch_at_login;
