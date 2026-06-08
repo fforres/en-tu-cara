@@ -240,10 +240,46 @@ pub fn calendar_authorization_status() -> String {
     format!("{:?}", EventsManager::authorization_status())
 }
 
+/// Open System Settings → Privacy & Security → Calendars.
+fn open_calendar_privacy_settings() {
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.preference.security?Privacy_Calendars")
+        .spawn();
+}
+
 #[tauri::command]
 pub fn request_calendar_access() -> Result<bool, String> {
-    let mgr = EventsManager::new();
-    mgr.request_access().map_err(|e| e.to_string())
+    let status = EventsManager::authorization_status();
+    log::info!("request_calendar_access: status={status:?}");
+    match status {
+        AuthorizationStatus::FullAccess => Ok(true),
+        // macOS only shows the system prompt from NotDetermined. Once the user
+        // is Denied/Restricted, requestAccess is a SILENT no-op — which is why
+        // the in-app "Grant calendar access" button looked like it did nothing.
+        // Deep-link to System Settings (the only place to re-enable) instead.
+        AuthorizationStatus::Denied | AuthorizationStatus::Restricted => {
+            log::info!("request_calendar_access: denied/restricted → opening System Settings");
+            open_calendar_privacy_settings();
+            Ok(false)
+        }
+        // NotDetermined: show the real prompt — but OFF the main thread. This
+        // command runs on the main thread (Tauri IPC); request_access blocks on
+        // the EventKit completion which needs the main run loop, so calling it
+        // here directly DEADLOCKS the UI (beach ball). Spawn it; the frontend's
+        // status poll (and the scheduler's 30s fetch) pick up the grant once the
+        // user answers, so events appear without this command blocking.
+        _ => {
+            log::info!("request_calendar_access: NotDetermined → prompting off-main");
+            std::thread::spawn(|| {
+                let mgr = EventsManager::new();
+                match mgr.request_access() {
+                    Ok(granted) => log::info!("request_calendar_access: prompt granted={granted}"),
+                    Err(e) => log::warn!("request_calendar_access: prompt error: {e}"),
+                }
+            });
+            Ok(false)
+        }
+    }
 }
 
 /// Run an EventKit query that may PANIC rather than error. `eventkit-rs` /
@@ -268,19 +304,30 @@ fn guard_eventkit<T, E: std::fmt::Display>(
     }
 }
 
+/// Can we READ events RIGHT NOW — checked WITHOUT requesting access.
+///
+/// CRITICAL: the read commands (fetch_events / list_calendars) run on the MAIN
+/// thread via Tauri's WebKit IPC. `ensure_authorized()` auto-calls the BLOCKING
+/// `request_access()` when status is NotDetermined; that blocks the main thread
+/// on the EventKit completion, which itself needs the main run loop → DEADLOCK /
+/// beach ball (confirmed via `sample`: main wedged in request_access →
+/// pthread_cond_wait). So reads must only QUERY status here and never request.
+/// The user grants via the explicit `request_calendar_access` command, which
+/// runs the prompt off-main.
+fn authorized_to_read() -> bool {
+    matches!(EventsManager::authorization_status(), AuthorizationStatus::FullAccess)
+}
+
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let t0 = std::time::Instant::now();
     log::info!("list_calendars: enter");
+    if !authorized_to_read() {
+        log::warn!("list_calendars: not authorized (no request — avoids main-thread deadlock)");
+        return Err("calendar access not granted".to_string());
+    }
     let mgr = EventsManager::new();
-    // ensure_authorized() can itself hit EventKit and panic-on-NULL — keep it
-    // INSIDE the guard so an unguarded panic can't tear down this Tauri command
-    // handler (bug H2). The closure unifies on String so both the auth error
-    // and the fetch error flow through the same channel.
-    let calendars = guard_eventkit("list_calendars", || -> Result<_, String> {
-        mgr.ensure_authorized().map_err(|e| e.to_string())?;
-        mgr.list_calendars().map_err(|e| e.to_string())
-    });
+    let calendars = guard_eventkit("list_calendars", || mgr.list_calendars());
     match &calendars {
         Ok(c) => log::info!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
         Err(e) => log::warn!("list_calendars: failed in {}ms: {e}", t0.elapsed().as_millis()),
@@ -292,17 +339,14 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
     let t0 = std::time::Instant::now();
     log::info!("fetch_events: enter back={days_back} fwd={days_forward}");
+    if !authorized_to_read() {
+        log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
+        return Err("calendar access not granted".to_string());
+    }
     let mgr = EventsManager::new();
     let now = Local::now();
-    // ensure_authorized() guarded too — see list_calendars / bug H2.
-    let events = guard_eventkit("fetch_events", || -> Result<_, String> {
-        mgr.ensure_authorized().map_err(|e| e.to_string())?;
-        mgr.fetch_events(
-            now - Duration::days(days_back),
-            now + Duration::days(days_forward),
-            None,
-        )
-        .map_err(|e| e.to_string())
+    let events = guard_eventkit("fetch_events", || {
+        mgr.fetch_events(now - Duration::days(days_back), now + Duration::days(days_forward), None)
     });
     match &events {
         Ok(e) => log::info!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
