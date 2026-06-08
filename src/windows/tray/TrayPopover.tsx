@@ -437,6 +437,16 @@ export function TrayPopover() {
       active = true;
       void refresh(); // one refresh per show
       setNow(new Date());
+      // The popover panel becomes key on show (needed for click-outside
+      // dismissal), and WebKit then auto-focuses the first control — the pause
+      // button — so it looks "pre-selected". Clear it so the popover opens with
+      // nothing highlighted. Deferred so it runs after WebKit applies the focus.
+      requestAnimationFrame(() => {
+        const el = document.activeElement;
+        if (el instanceof HTMLElement && el !== document.body) {
+          el.blur();
+        }
+      });
       data ??= setInterval(() => void refresh(), 30_000); // poll backstop
       clock ??= setInterval(() => setNow(new Date()), 15_000);
     };
