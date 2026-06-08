@@ -52,6 +52,7 @@ scripts/checkpoints/       regression gates: *-auto.sh + human runbooks
 ## Remaining work
 
 ### Tray popover & menu
+
 - **Cog menu**: a cog in the popover opens a native macOS menu —
   Settings · About · Feedback · Quit.
 - **Popover positioning**: native `NSWindow` `setFrame:` (bypasses Tauri's
@@ -59,21 +60,25 @@ scripts/checkpoints/       regression gates: *-auto.sh + human runbooks
   verify the first click lands centered under the icon on every display.
 
 ### Appearance
+
 - Full dock-icon picker and full tray-glyph picker. Curated sets live in
   `assets/icon-options/` — never delete them; ids are stable.
 
 ### Distribution hardening
+
 - Apple Developer ID cert + notarization. Today the build is ad-hoc signed:
   Gatekeeper needs right-click→Open on first launch, and the TCC calendar grant
   is keyed to the ad-hoc code identity (can re-prompt across rebuilds).
 
 ### Reliability hardening
+
 - Permission revoked mid-run → tray banner + System Settings deep-link.
 - Chaos: 0 calendars; ~300 events; week-long sleep → no alert storm on wake;
   monitor hot-plug between arming and fire re-targets overlay panels.
 - Resource re-check: idle < 120 MB; overlays on 2 displays < 250 MB.
 
 ### EventKit freshness
+
 - Confirm propagation when Calendar.app is closed (event made on iPhone/web).
   Fallback ladder if stale: trigger EventKit refresh on poll/wake → prompt to
   open Calendar.app → escalate (the local-only premise needs a rethink).

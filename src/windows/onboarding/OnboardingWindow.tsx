@@ -82,15 +82,48 @@ export function OnboardingWindow() {
       .catch(() => setCal("needed"));
   }, []);
 
-  useEffect(() => {
-    refreshCal();
+  const refreshNotif = useCallback(() => {
     isPermissionGranted()
       .then((g) => setNotif(g ? "granted" : "needed"))
       .catch(() => setNotif("needed"));
+  }, []);
+
+  useEffect(() => {
+    refreshCal();
+    refreshNotif();
     invoke<{ launch_at_login: boolean }>("get_settings")
       .then((s) => setLogin(s.launch_at_login))
       .catch(() => {});
-  }, [refreshCal]);
+  }, [refreshCal, refreshNotif]);
+
+  // Calendar/notification access is granted OUT of the app — the macOS prompt's
+  // completion, or the user flipping it in System Settings — and nothing notifies
+  // the webview. Re-poll every 5s while this window is visible so a row flips to
+  // "✓ Granted" on its own right after the user grants, no manual refresh. Paused
+  // while hidden to avoid pointless wakeups.
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    const poll = () => {
+      refreshCal();
+      refreshNotif();
+    };
+    const start = () => {
+      timer ??= setInterval(poll, 5000);
+    };
+    const stop = () => {
+      if (timer !== null) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+    const sync = () => (document.visibilityState === "visible" ? start() : stop());
+    sync();
+    document.addEventListener("visibilitychange", sync);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", sync);
+    };
+  }, [refreshCal, refreshNotif]);
 
   const grantCal = useCallback(async () => {
     await invoke("request_calendar_access").catch(() => {});
@@ -106,7 +139,7 @@ export function OnboardingWindow() {
     setLogin(on);
     invoke<Record<string, unknown>>("get_settings")
       .then((s) => invoke("set_settings", { settings: { ...s, launch_at_login: on } }))
-      .catch(() => {});
+      .catch(() => setLogin(!on)); // keep the toggle honest if the write fails
   }, []);
 
   return (
@@ -162,14 +195,14 @@ export function OnboardingWindow() {
             aria-label="Start at login"
             checked={login}
             onChange={(e) => toggleLogin(e.target.checked)}
-            style={{ width: 18, height: 18, accentColor: "Highlight" }}
+            style={{ width: 18, height: 18, accentColor: "AccentColor" }}
           />
         </div>
       </div>
 
       <div style={{ marginTop: "auto", display: "flex", justifyContent: "flex-end" }}>
         <button
-          onClick={() => void invoke("finish_onboarding")}
+          onClick={() => void invoke("finish_onboarding").catch((e) => console.error(e))}
           style={{
             font: "inherit",
             fontWeight: 600,

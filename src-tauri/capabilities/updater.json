@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "updater",
-  "description": "Self-update: check GitHub releases, download + install, relaunch.",
-  "windows": ["*"],
+  "description": "Self-update + first-run notification permission, scoped to the trusted first-party windows that actually use them: 'popover' (startup update check → download → relaunch, via updater.ts), 'settings' (manual update check), 'onboarding' (notification permission prompt). Deliberately EXCLUDES 'overlay-*': the takeover alert renders untrusted calendar text and has no business holding process-relaunch/updater reach.",
+  "windows": ["popover", "settings", "onboarding"],
   "permissions": ["updater:default", "process:default", "notification:default", "store:default"]
 }

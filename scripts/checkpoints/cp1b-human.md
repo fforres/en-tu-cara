@@ -44,7 +44,7 @@ also want to confirm the sound is audible.)
 - [ ] Dismiss (button / Esc) closes it cleanly; any leftover panels self-close
       when the spike window elapses.
 
-## If it fails (overlay appears *under* the fullscreen app, or on the wrong Space)
+## If it fails (overlay appears _under_ the fullscreen app, or on the wrong Space)
 
 Check, in order:
 

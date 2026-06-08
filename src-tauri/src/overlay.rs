@@ -92,7 +92,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
                 panel.order_front_regardless();
             }
         }
-        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
             if let Ok(panel) = app.get_webview_panel(main_label) {
                 panel.show_and_make_key();
             }
@@ -113,15 +113,17 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         let pos = monitor.position().to_logical::<f64>(scale);
         let size = monitor.size().to_logical::<f64>(scale);
 
-        // The alert card renders on the PRIMARY display; every other display gets
-        // frosted glass only (CP1b-human feedback) — present but not shouting thrice.
+        // CARD ON EVERY DISPLAY (user request): the alert renders AND is
+        // actionable on all screens, not just the primary. Every panel is an
+        // OverlayPanel (can take key) so Join/Dismiss/Snooze work wherever the
+        // user is looking; the primary still takes INITIAL key status (below) so
+        // Esc/Enter work immediately without a click.
         let is_primary = primary.as_ref().is_none_or(|p| p == monitor.position());
-        let role = if is_primary { "main" } else { "dim" };
 
         let window = WebviewWindowBuilder::new(
             app,
             &label,
-            WebviewUrl::App(format!("index.html?window=overlay&role={role}").into()),
+            WebviewUrl::App("index.html?window=overlay&role=main".into()),
         )
         .title("En Tu Cara Alert")
         .position(pos.x, pos.y)
@@ -144,12 +146,10 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .visible(false) // shown via panel.order_front_regardless below
         .build()?;
 
-        let panel = if is_primary {
-            *MAIN_OVERLAY.lock().unwrap() = Some(label.clone());
-            window.to_panel::<OverlayPanel>()?
-        } else {
-            window.to_panel::<DimPanel>()?
-        };
+        if is_primary {
+            *MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(label.clone());
+        }
+        let panel = window.to_panel::<OverlayPanel>()?;
         panel.set_level(PanelLevel::ScreenSaver.value());
         // Nonactivating: takeover draws above everything but never activates the app —
         // focus stays where the user was (they may be mid-keystroke in the meeting).
@@ -178,7 +178,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     // Autofocus the principal display: the main panel takes key status so Esc /
     // Enter work immediately. Nonactivating style means the APP still doesn't
     // activate — focus-of-record stays with whatever the user was using.
-    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap().as_ref() {
+    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
         if let Ok(panel) = app.get_webview_panel(main_label) {
             panel.show_and_make_key();
         }

@@ -1,9 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Capability for the main window",
+  "description": "Core APIs + link opening (opener) for every real app window. NOTE: the labels below MUST match the windows actually created — 'popover' (tauri.conf.json), 'settings'/'onboarding' (tray.rs), and 'overlay-*' (overlay.rs). They previously targeted a nonexistent 'main' window, so opener:default reached nothing and the Join button had no permission.",
   "windows": [
-    "main"
+    "popover",
+    "settings",
+    "onboarding",
+    "overlay-*"
   ],
   "permissions": [
     "core:default",

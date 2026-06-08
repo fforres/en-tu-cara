@@ -63,11 +63,19 @@ pub struct FireAction {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct AlarmState {
     /// (occurrence_key, kind) → fired-at. GC'd by `gc`.
     pub fired: HashMap<String, DateTime<Utc>>,
     /// occurrence_key → snooze deadline. Cleared when fired.
     pub snoozes: HashMap<String, DateTime<Utc>>,
+    /// occurrence_key → occurrence END. Ignored occurrences never alert (T-5/
+    /// T-0/snooze all suppressed). Keyed by the OCCURRENCE (event_id @ start),
+    /// so ignoring one instance never touches the rest of a recurring series.
+    /// The value is the occurrence's end (NOT ignored-at) so `gc` only drops an
+    /// ignore 48h after the occurrence ENDS — the tray lets users ignore events
+    /// up to 7 days out, and an ignored-at age would silently re-arm them.
+    pub ignored: HashMap<String, DateTime<Utc>>,
     pub paused: bool,
 }
 
@@ -90,12 +98,42 @@ impl AlarmState {
         // Re-arming a snooze must allow it to fire again.
         self.fired.remove(&fired_key(occurrence_key, AlarmKind::Snooze));
     }
+    /// Ignore one occurrence so it never alerts. Per-occurrence: ignoring one
+    /// instance of a recurring meeting leaves every other instance alone.
+    /// `ends_at` is the occurrence's END — stored so `gc` keeps the ignore
+    /// alive until 48h after the occurrence ends (not 48h after it was clicked).
+    pub fn ignore(&mut self, occurrence_key: &str, ends_at: DateTime<Utc>) {
+        self.ignored.insert(occurrence_key.to_string(), ends_at);
+    }
+    pub fn unignore(&mut self, occurrence_key: &str) {
+        self.ignored.remove(occurrence_key);
+    }
+    pub fn is_ignored(&self, occurrence_key: &str) -> bool {
+        self.ignored.contains_key(occurrence_key)
+    }
     /// Drop state for occurrences that ended > 48 h ago (GC rule).
-    /// Keys embed the occurrence; we GC by fired-at age as the proxy.
+    /// `fired`/`snoozes` GC by their stored timestamp as the proxy; `ignored`
+    /// GCs by the occurrence END it stores, so an ignore set on an event days
+    /// out is never dropped before that event is well past.
     pub fn gc(&mut self, now: DateTime<Utc>) {
         let cutoff = now - Duration::hours(48);
         self.fired.retain(|_, at| *at > cutoff);
         self.snoozes.retain(|_, until| *until > cutoff);
+        self.ignored.retain(|_, ends_at| *ends_at > cutoff);
+    }
+}
+
+/// The instant T-0 (and a due snooze) stop being eligible for an event.
+/// Normally the event's end. But a zero- or negative-duration event (a 0-minute
+/// calendar block / milestone, where `start == end`) could otherwise NEVER get a
+/// T-0: `now < end` is unsatisfiable once `now >= start`. Give only those a 60s
+/// grace so "your meeting is starting" still fires; positive-duration events keep
+/// their exact end so none of their behavior changes.
+fn t0_window_end(event: &AlarmEvent) -> DateTime<Utc> {
+    if event.end > event.start {
+        event.end
+    } else {
+        event.start + Duration::seconds(60)
     }
 }
 
@@ -124,7 +162,10 @@ pub fn compute_actions(
 ) -> Vec<FireAction> {
     let mut actions = Vec::new();
 
-    for event in events.iter().filter(|e| alertable(e, cfg)) {
+    for event in events
+        .iter()
+        .filter(|e| alertable(e, cfg) && !state.is_ignored(&e.occurrence_key))
+    {
         let t5_due = event.start - Duration::seconds(cfg.lead_secs);
 
         // T-5: due, not yet fired, and the MEETING HAS NOT STARTED — once the
@@ -144,7 +185,7 @@ pub fn compute_actions(
         // T-0: due, not fired, event still ongoing (missed-while-asleep policy:
         // fire on the first tick after wake while ongoing; never after it ended).
         if now >= event.start
-            && now < event.end
+            && now < t0_window_end(event)
             && !state.has_fired(&event.occurrence_key, AlarmKind::TZero)
         {
             actions.push(FireAction {
@@ -158,9 +199,12 @@ pub fn compute_actions(
 
     // Snoozes: due and the event still ongoing.
     for (key, until) in &state.snoozes {
+        if state.is_ignored(key) {
+            continue;
+        }
         if now >= *until && !state.has_fired(key, AlarmKind::Snooze) {
             if let Some(event) = events.iter().find(|e| &e.occurrence_key == key) {
-                if now < event.end && alertable(event, cfg) {
+                if now < t0_window_end(event) && alertable(event, cfg) {
                     actions.push(FireAction {
                         occurrence_key: key.clone(),
                         kind: AlarmKind::Snooze,
@@ -190,7 +234,10 @@ pub fn next_due(
             next = Some(t);
         }
     };
-    for e in events.iter().filter(|e| alertable(e, cfg)) {
+    for e in events
+        .iter()
+        .filter(|e| alertable(e, cfg) && !state.is_ignored(&e.occurrence_key))
+    {
         if !state.has_fired(&e.occurrence_key, AlarmKind::TMinus5) {
             consider(e.start - Duration::seconds(cfg.lead_secs));
         }
@@ -198,8 +245,10 @@ pub fn next_due(
             consider(e.start);
         }
     }
-    for until in state.snoozes.values() {
-        consider(*until);
+    for (key, until) in &state.snoozes {
+        if !state.is_ignored(key) {
+            consider(*until);
+        }
     }
     next
 }
@@ -401,6 +450,108 @@ mod tests {
         let state = AlarmState::default();
         let actions = compute_actions(&[no_link, with_link], t(400), &state, &only_video);
         assert_eq!(kinds(&actions), vec![("link".into(), AlarmKind::TZero)]);
+    }
+
+    #[test]
+    fn zero_duration_event_still_gets_t0() {
+        // A 0-minute calendar block (start == end): the old `now < end` made T-0
+        // unreachable. The grace window fires "starting now" instead.
+        let events = vec![ev("point", 300, 300)];
+        let mut state = AlarmState::default();
+        let at_t5 = compute_actions(&events, t(0), &state, &cfg());
+        assert_eq!(kinds(&at_t5), vec![("point".into(), AlarmKind::TMinus5)], "T-5 still works");
+        state.mark_fired("point", AlarmKind::TMinus5, t(0));
+        let at_t0 = compute_actions(&events, t(300), &state, &cfg());
+        assert_eq!(kinds(&at_t0), vec![("point".into(), AlarmKind::TZero)], "T-0 fires despite 0 duration");
+        state.mark_fired("point", AlarmKind::TZero, t(300));
+        assert!(
+            compute_actions(&events, t(400), &state, &cfg()).is_empty(),
+            "no longer eligible past the grace"
+        );
+    }
+
+    #[test]
+    fn positive_duration_t0_window_is_unchanged() {
+        // A short (30s) but non-zero event keeps its EXACT window — grace applies
+        // only to zero/negative-duration events.
+        let events = vec![ev("short", 0, 30)];
+        let state = AlarmState::default();
+        assert_eq!(t0_window_end(&events[0]), t(30), "positive duration → end unchanged");
+        // Past its real end it must not fire (grace must not leak in).
+        assert!(compute_actions(&events, t(45), &state, &cfg()).is_empty());
+    }
+
+    #[test]
+    fn ignored_occurrence_never_alerts_but_others_do() {
+        // Two occurrences of a recurring meeting. Ignoring ONE must suppress its
+        // T-5 and T-0 while the other still fires — per-occurrence, not series.
+        let events = vec![ev("(r @ t1)", 300, 1200), ev("(r @ t2)", 300, 1200)];
+        let mut state = AlarmState::default();
+        state.ignore("(r @ t1)", t(0));
+
+        // At T-5: only the non-ignored occurrence fires.
+        let at_t5 = compute_actions(&events, t(0), &state, &cfg());
+        assert_eq!(kinds(&at_t5), vec![("(r @ t2)".into(), AlarmKind::TMinus5)]);
+        // At start: still only the non-ignored one.
+        let at_t0 = compute_actions(&events, t(300), &state, &cfg());
+        assert_eq!(kinds(&at_t0), vec![("(r @ t2)".into(), AlarmKind::TZero)]);
+        // next_due also skips the ignored occurrence.
+        assert_eq!(next_due(&events, t(-100), &state, &cfg()), Some(t(0))); // t2's T-5
+    }
+
+    #[test]
+    fn unignore_restores_alerts() {
+        let events = vec![ev("m", 300, 1200)];
+        let mut state = AlarmState::default();
+        state.ignore("m", t(0));
+        assert!(compute_actions(&events, t(300), &state, &cfg()).is_empty(), "ignored → silent");
+        state.unignore("m");
+        let actions = compute_actions(&events, t(300), &state, &cfg());
+        assert_eq!(kinds(&actions), vec![("m".into(), AlarmKind::TZero)], "un-ignored → fires again");
+    }
+
+    #[test]
+    fn ignore_persists_across_restart() {
+        let mut state = AlarmState::default();
+        // Ignored value is the occurrence END.
+        state.ignore("(r @ t1)", t(1200));
+        let state: AlarmState =
+            serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+        assert!(state.is_ignored("(r @ t1)"), "ignore persists across restart");
+    }
+
+    #[test]
+    fn ignore_with_future_end_survives_gc_run_long_after_set() {
+        // Bug H1: an event ignored up to 7 days out used to be GC'd 48h after it
+        // was CLICKED — re-arming a meeting the user explicitly silenced. The
+        // stored value is now the occurrence END, GC'd only 48h after that end.
+        let mut state = AlarmState::default();
+        // Occurrence ends 5 days out; user ignored it now (t(0)).
+        let ends_at = t(5 * 24 * 3600);
+        state.ignore("(future @ t)", ends_at);
+        // GC runs 3 days later (well past the 48h-since-click threshold).
+        state.gc(t(3 * 24 * 3600));
+        assert!(
+            state.is_ignored("(future @ t)"),
+            "ignore of a still-future occurrence must survive gc",
+        );
+    }
+
+    #[test]
+    fn ignore_with_old_end_is_gc_dropped() {
+        // An ignore whose occurrence ENDED > 48h ago is stale and gets dropped.
+        let mut state = AlarmState::default();
+        state.ignore("(past @ t)", t(0)); // occurrence ended at base
+        state.gc(t(49 * 3600)); // 49h after the end
+        assert!(!state.is_ignored("(past @ t)"), "stale ignore (end >48h ago) GC'd");
+    }
+
+    #[test]
+    fn old_state_without_ignored_field_deserializes() {
+        // Forward/back compat: a state.json written before `ignored` existed.
+        let parsed: AlarmState =
+            serde_json::from_str(r#"{"fired":{},"snoozes":{},"paused":false}"#).unwrap();
+        assert!(parsed.ignored.is_empty());
     }
 
     #[test]

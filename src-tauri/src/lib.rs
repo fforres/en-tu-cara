@@ -22,6 +22,33 @@ pub fn run() {
     // Skyward data dir (~/.config/skyward/en-tu-cara) for logs + exports.
     paths::ensure();
 
+    // eventkit-rs / objc2-event-kit PANIC (rather than error) when an EventKit
+    // call returns NULL — which happens whenever the process has no calendar
+    // access (notably a bare `tauri dev` binary, whose TCC grant is keyed to the
+    // terminal, not our bundle id; see gotcha #5). We already contain that unwind
+    // in calendar::guard_eventkit and degrade to "no events", but catch_unwind
+    // does NOT stop the default hook from printing the backtrace first — so it
+    // spams the log on every poll.
+    //
+    // Narrow the swallow to EXACTLY that benign NULL-on-no-access read panic,
+    // identified by its payload message ("unexpected NULL returned" — objc2's
+    // signature when a non-null return is None). Keying on the source FILE
+    // (`objc2-event-kit`) was too broad: it also hid genuine bugs in that crate,
+    // e.g. a panic on the real-e2e event-CREATION write path. Every other panic
+    // — including other objc2-event-kit panics — goes through the default hook.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
+        let is_eventkit_null = payload.is_some_and(|p| p.contains("unexpected NULL returned"));
+        if !is_eventkit_null {
+            default_hook(info);
+        }
+    }));
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -68,10 +95,14 @@ pub fn run() {
             scheduler::dismiss_alarms,
             scheduler::set_paused,
             scheduler::get_paused,
+            scheduler::ignore_occurrence,
+            scheduler::unignore_occurrence,
+            scheduler::get_ignored,
             tray::open_settings,
             tray::maybe_show_onboarding,
             tray::finish_onboarding,
             tray::open_url,
+            tray::open_in_calendar,
             tray::hide_popover,
             settings::get_settings,
             settings::set_settings,
@@ -113,6 +144,11 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::maybe_run_fire_spike(app.handle());
 
+            // DIAGNOSTIC: ENTUCARA_SPIKE_TOGGLE=<n> → drive the popover open/close
+            // n times to reproduce the open/close crash without manual clicking.
+            #[cfg(target_os = "macos")]
+            tray::maybe_run_toggle_spike(app.handle());
+
             // Visual checks / dev convenience: open the settings window on launch
             // (after the 2s setup-grace — window creation during setup is the
             // known abort trap).
@@ -152,8 +188,14 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
 
-            // Launch at login per settings (default on). Skipped in test mode so
-            // e2e runs don't register the dev binary as a login item.
+            // Launch at login per settings (default on). Skipped in test mode AND
+            // in ALL debug builds: a dev binary must never register a LaunchAgent
+            // pointing at target/debug/en-tu-cara. Enabling autostart loads that
+            // agent (RunAtLoad=true), which immediately spawns a SECOND copy of the
+            // dev binary; it loses the single-instance race and exits, so the tray
+            // flickers up and the app "closes on its own". Only the packaged release
+            // build manages autostart.
+            #[cfg(not(debug_assertions))]
             if !testmode::is_test_mode() {
                 use tauri_plugin_autostart::ManagerExt as _;
                 let wanted = app.state::<settings::SettingsStore>().get().launch_at_login;

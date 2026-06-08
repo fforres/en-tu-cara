@@ -76,7 +76,17 @@ pub fn log_fire(key: &str, kind: &str, scheduled_for: DateTime<Utc>) {
             }
         }
     }
-    FIRE_LOG.lock().unwrap().push(record);
+    // Poison-tolerant (this runs on the scheduler thread on every fire) and
+    // bounded: this app runs for weeks, so cap the in-memory log to the most
+    // recent entries — it backs test assertions + recent diagnostics, never the
+    // full history (test mode mirrors everything to disk above).
+    let mut log = FIRE_LOG.lock().unwrap_or_else(|e| e.into_inner());
+    log.push(record);
+    const MAX_RECORDS: usize = 256;
+    if log.len() > MAX_RECORDS {
+        let excess = log.len() - MAX_RECORDS;
+        log.drain(0..excess);
+    }
 }
 
 #[tauri::command]
@@ -105,7 +115,7 @@ pub fn advance_clock(seconds: i64) -> Result<String, String> {
 
 #[tauri::command]
 pub fn get_fired_log() -> Vec<FireRecord> {
-    FIRE_LOG.lock().unwrap().clone()
+    FIRE_LOG.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 #[cfg(test)]

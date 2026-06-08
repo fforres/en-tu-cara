@@ -3,7 +3,7 @@
 // Raw macOS styling: system-ui, CSS system colors (opaque normal window — the
 // active/inactive system-color trap only applies to the overlay panels).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   REGISTRY,
@@ -36,12 +36,15 @@ function Highlight({ text, ranges }: { text: string; ranges: Array<[number, numb
   }
   const parts: React.ReactNode[] = [];
   let cursor = 0;
-  ranges.forEach(([start, end], i) => {
+  ranges.forEach(([start, end]) => {
     if (start > cursor) {
       parts.push(text.slice(cursor, start));
     }
     parts.push(
-      <mark key={i} style={{ background: "Highlight", color: "HighlightText", borderRadius: 2 }}>
+      <mark
+        key={`${start}-${end}`}
+        style={{ background: "Highlight", color: "HighlightText", borderRadius: 2 }}
+      >
         {text.slice(start, end)}
       </mark>,
     );
@@ -67,7 +70,7 @@ function Toggle({
       aria-label={label}
       checked={checked}
       onChange={(e) => onChange(e.target.checked)}
-      style={{ width: 18, height: 18, accentColor: "Highlight" }}
+      style={{ width: 18, height: 18, accentColor: "AccentColor" }}
     />
   );
 }
@@ -406,6 +409,13 @@ export function SettingsWindow() {
     return SECTIONS.some((s) => s.id === fromUrl) ? (fromUrl as SectionId) : "general";
   });
   const [error, setError] = useState<string | null>(null);
+  // Mirror of `settings` so `update` can merge patches without a stale closure
+  // and WITHOUT calling invoke inside a setState updater (which StrictMode runs
+  // twice → double set_settings).
+  const settingsRef = useRef<Settings | null>(null);
+  useEffect(() => {
+    settingsRef.current = settings;
+  }, [settings]);
 
   const refreshCalendars = useCallback(() => {
     invoke<string>("calendar_authorization_status")
@@ -434,14 +444,18 @@ export function SettingsWindow() {
   }, [refreshCalendars]);
 
   const update = useCallback((patch: Partial<Settings>) => {
-    setSettings((prev) => {
-      if (!prev) {
-        return prev;
-      }
-      const next = { ...prev, ...patch };
-      invoke("set_settings", { settings: next }).catch((e) => setError(String(e)));
-      return next;
-    });
+    const prev = settingsRef.current;
+    if (!prev) {
+      return;
+    }
+    const next = { ...prev, ...patch };
+    settingsRef.current = next; // keep current for back-to-back updates
+    setSettings(next);
+    // Persist OUTSIDE the state updater (live-apply is the contract — no save
+    // button). Clear any stale error banner once a write succeeds.
+    invoke("set_settings", { settings: next })
+      .then(() => setError(null))
+      .catch((e) => setError(String(e)));
   }, []);
 
   const hits = useMemo(() => searchSettings(query, REGISTRY), [query]);

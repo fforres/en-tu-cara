@@ -2,11 +2,11 @@
 // THEME (themes.ts) — always fixed rgba, identical on every display regardless
 // of window activation (hard-won lesson; do not use CSS system colors here).
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { extractMeetingLink } from "../../lib/meeting-links";
+import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 import { resolveTheme, type Theme } from "./themes";
 import type { UiEvent } from "../tray/TrayPopover";
 
@@ -56,6 +56,7 @@ export function OverlayAlert() {
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(null));
   const [snoozes, setSnoozes] = useState<number[]>([1, 5]);
   const [now, setNow] = useState(() => new Date());
+  const containerRef = useRef<HTMLElement>(null);
 
   useEffect(() => {
     // The fire emit happens BEFORE this window's JS boots — pull active alarms
@@ -69,6 +70,10 @@ export function OverlayAlert() {
       .then(dedupAdd)
       .catch(() => {});
     const unlistenPromise = listen<AlarmPayload>("alarm-fired", (e) => dedupAdd([e.payload]));
+    // After a per-occurrence dismiss/snooze the backend keeps the overlay open
+    // and emits the reduced set so the remaining cards (e.g. an overlapping
+    // meeting) stay visible. Replace, don't append.
+    const unlistenUpdated = listen<AlarmPayload[]>("alarms-updated", (e) => setAlarms(e.payload));
     invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 1 })
       .then(setEvents)
       .catch(() => {});
@@ -89,6 +94,7 @@ export function OverlayAlert() {
     window.addEventListener("keydown", onKey);
     return () => {
       void unlistenPromise.then((u) => u());
+      void unlistenUpdated.then((u) => u());
       clearInterval(clock);
       window.removeEventListener("keydown", onKey);
     };
@@ -101,6 +107,29 @@ export function OverlayAlert() {
       return { alarm, event, link };
     });
   }, [alarms, events]);
+
+  // Key the focus effect on the card IDENTITY signature, not the count: a swap
+  // that keeps the count the same (one dismissed + one added in a single
+  // alarms-updated) must still re-run the effect, or focus strands on a removed
+  // Dismiss node and the "stray Enter can't join" guarantee lapses.
+  const cardsSignature = cards.map((c) => `${c.alarm.occurrence_key}#${c.alarm.kind}`).join("|");
+
+  // Deterministic focus as cards arrive/leave (React's static autoFocus only
+  // fires on a node's first mount, so it stranded focus when cards mounted after
+  // the zero-card fallback). Land focus on the first Dismiss — NEVER Join, so a
+  // stray Enter can't join a meeting. Don't steal focus if the user already
+  // tabbed to one of our buttons. Esc works regardless (window-level listener).
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) {
+      return;
+    }
+    const active = document.activeElement;
+    if (active && active !== document.body && root.contains(active)) {
+      return;
+    }
+    root.querySelector<HTMLButtonElement>("[data-dismiss]")?.focus();
+  }, [cardsSignature]);
 
   if (role === "dim") {
     // Tint-only companion. pointer-events none + a window class that can never
@@ -120,6 +149,7 @@ export function OverlayAlert() {
 
   return (
     <main
+      ref={containerRef}
       style={{
         font: "17px system-ui, -apple-system, sans-serif",
         background: theme.backdrop,
@@ -138,8 +168,13 @@ export function OverlayAlert() {
       {cards.length === 0 && (
         <>
           <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>
-          {/* Dismiss must ALWAYS exist (CP1b-human: "I couldn't close it"). */}
-          <button autoFocus onClick={() => invoke("dismiss_alarms")} style={secondaryButton}>
+          {/* Dismiss must ALWAYS exist (CP1b-human: "I couldn't close it"). No
+              key → dismiss everything (the blunt escape hatch). */}
+          <button
+            data-dismiss
+            onClick={() => void invoke("dismiss_alarms").catch(() => {})}
+            style={secondaryButton}
+          >
             Dismiss
           </button>
         </>
@@ -170,10 +205,17 @@ export function OverlayAlert() {
           <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
             {link && (
               <button
-                autoFocus
                 onClick={async () => {
-                  await openUrl(link.url);
-                  void invoke("dismiss_alarms");
+                  const key = alarm.occurrence_key;
+                  try {
+                    if (isWebUrl(link.url)) {
+                      await openUrl(link.url);
+                    }
+                  } catch {
+                    // Opening failed — still dismiss so the alert never sticks.
+                  } finally {
+                    void invoke("dismiss_alarms", { occurrenceKey: key }).catch(() => {});
+                  }
                 }}
                 style={{
                   font: "inherit",
@@ -189,7 +231,15 @@ export function OverlayAlert() {
                 📹 Join
               </button>
             )}
-            <button onClick={() => invoke("dismiss_alarms")} style={secondaryButton}>
+            <button
+              data-dismiss
+              onClick={() =>
+                void invoke("dismiss_alarms", { occurrenceKey: alarm.occurrence_key }).catch(
+                  () => {},
+                )
+              }
+              style={secondaryButton}
+            >
               Dismiss
             </button>
           </div>
@@ -199,7 +249,10 @@ export function OverlayAlert() {
               <button
                 key={m}
                 onClick={() =>
-                  invoke("snooze_alarm", { occurrenceKey: alarm.occurrence_key, minutes: m })
+                  void invoke("snooze_alarm", {
+                    occurrenceKey: alarm.occurrence_key,
+                    minutes: m,
+                  }).catch(() => {})
                 }
                 style={{
                   font: "inherit",

@@ -163,6 +163,20 @@ mod tests {
     }
 
     #[test]
+    fn guard_eventkit_contains_a_panic_as_err() {
+        // The whole point: an EventKit NULL-panic must become an Err, never an
+        // unwind into the scheduler tick or a Tauri command handler.
+        let ok: Result<i32, String> = guard_eventkit("x", || Ok::<_, String>(5));
+        assert_eq!(ok, Ok(5));
+        let err: Result<i32, String> = guard_eventkit("x", || Err::<i32, String>("nope".into()));
+        assert_eq!(err, Err("nope".to_string()));
+        let panicked: Result<i32, String> =
+            guard_eventkit("probe", || -> Result<i32, String> { panic!("unexpected NULL") });
+        assert!(panicked.is_err());
+        assert!(panicked.unwrap_err().contains("probe"));
+    }
+
+    #[test]
     fn dedup_prefers_row_with_my_rsvp() {
         // CP1a real-data case: same meeting via a colleague's subscribed calendar
         // (no rsvp) and via the user's own calendar (rsvp present).
@@ -232,31 +246,69 @@ pub fn request_calendar_access() -> Result<bool, String> {
     mgr.request_access().map_err(|e| e.to_string())
 }
 
+/// Run an EventKit query that may PANIC rather than error. `eventkit-rs` /
+/// `objc2-event-kit` panic when an EventKit call returns NULL — which happens
+/// when the process isn't truly calendar-authorized even though
+/// `authorization_status` reports access (notably a bare `tauri dev` binary
+/// whose code identity holds no TCC grant — see gotcha #5). Containing the
+/// unwind here is load-bearing: this same code runs both on the scheduler tick
+/// AND, via `invoke`, on the Tauri command thread for the tray popover — an
+/// unguarded panic there tears down the popover (and starves the UI) instead of
+/// degrading to "no events".
+fn guard_eventkit<T, E: std::fmt::Display>(
+    what: &str,
+    f: impl FnOnce() -> Result<T, E>,
+) -> Result<T, String> {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(e)) => Err(e.to_string()),
+        Err(_) => Err(format!(
+            "{what}: EventKit returned no data — calendar access is unavailable to this process"
+        )),
+    }
+}
+
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!("list_calendars: enter");
     let mgr = EventsManager::new();
-    mgr.ensure_authorized().map_err(|e| e.to_string())?;
-    Ok(mgr
-        .list_calendars()
-        .map_err(|e| e.to_string())?
-        .iter()
-        .map(calendar_dto)
-        .collect())
+    // ensure_authorized() can itself hit EventKit and panic-on-NULL — keep it
+    // INSIDE the guard so an unguarded panic can't tear down this Tauri command
+    // handler (bug H2). The closure unifies on String so both the auth error
+    // and the fetch error flow through the same channel.
+    let calendars = guard_eventkit("list_calendars", || -> Result<_, String> {
+        mgr.ensure_authorized().map_err(|e| e.to_string())?;
+        mgr.list_calendars().map_err(|e| e.to_string())
+    });
+    match &calendars {
+        Ok(c) => log::info!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
+        Err(e) => log::warn!("list_calendars: failed in {}ms: {e}", t0.elapsed().as_millis()),
+    }
+    Ok(calendars?.iter().map(calendar_dto).collect())
 }
 
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!("fetch_events: enter back={days_back} fwd={days_forward}");
     let mgr = EventsManager::new();
-    mgr.ensure_authorized().map_err(|e| e.to_string())?;
     let now = Local::now();
-    let events = mgr
-        .fetch_events(
+    // ensure_authorized() guarded too — see list_calendars / bug H2.
+    let events = guard_eventkit("fetch_events", || -> Result<_, String> {
+        mgr.ensure_authorized().map_err(|e| e.to_string())?;
+        mgr.fetch_events(
             now - Duration::days(days_back),
             now + Duration::days(days_forward),
             None,
         )
-        .map_err(|e| e.to_string())?;
-    Ok(dedup_events(events.iter().map(event_dto).collect()))
+        .map_err(|e| e.to_string())
+    });
+    match &events {
+        Ok(e) => log::info!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
+        Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
+    }
+    Ok(dedup_events(events?.iter().map(event_dto).collect()))
 }
 
 /// Real-pipeline e2e (user-authorized fast test): create a REAL EventKit event
