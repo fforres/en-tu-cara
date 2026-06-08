@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!-- Hardened-runtime resource-access entitlement for EventKit calendars.
+       The packaged build is signed with the hardened runtime (required for
+       notarization), and WITHOUT this the runtime blocks calendar access BEFORE
+       it reaches TCC — no permission prompt ever appears (verified: the request
+       returned granted=false with no dialog and no tccd log). With it, EventKit
+       reaches TCC normally and the prompt shows. -->
+  <key>com.apple.security.personal-information.calendars</key>
+  <true/>
+</dict>
+</plist>

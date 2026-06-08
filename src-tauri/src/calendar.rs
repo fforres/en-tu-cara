@@ -248,7 +248,7 @@ fn open_calendar_privacy_settings() {
 }
 
 #[tauri::command]
-pub fn request_calendar_access() -> Result<bool, String> {
+pub fn request_calendar_access(app: tauri::AppHandle) -> Result<bool, String> {
     let status = EventsManager::authorization_status();
     log::info!("request_calendar_access: status={status:?}");
     match status {
@@ -265,15 +265,22 @@ pub fn request_calendar_access() -> Result<bool, String> {
         // NotDetermined: show the real prompt — but OFF the main thread. This
         // command runs on the main thread (Tauri IPC); request_access blocks on
         // the EventKit completion which needs the main run loop, so calling it
-        // here directly DEADLOCKS the UI (beach ball). Spawn it; the frontend's
-        // status poll (and the scheduler's 30s fetch) pick up the grant once the
-        // user answers, so events appear without this command blocking.
+        // here directly DEADLOCKS the UI (beach ball). Spawn it.
         _ => {
             log::info!("request_calendar_access: NotDetermined → prompting off-main");
-            std::thread::spawn(|| {
+            std::thread::spawn(move || {
                 let mgr = EventsManager::new();
                 match mgr.request_access() {
-                    Ok(granted) => log::info!("request_calendar_access: prompt granted={granted}"),
+                    // EventKit caches the authorization status in the granting
+                    // PROCESS — so this process keeps reading "not authorized"
+                    // even after a grant until it's relaunched (verified: events
+                    // only appeared after a restart). Relaunch so the fresh
+                    // process picks up the grant and events show immediately.
+                    Ok(true) => {
+                        log::info!("request_calendar_access: granted → relaunching to apply");
+                        app.restart();
+                    }
+                    Ok(false) => log::info!("request_calendar_access: prompt denied"),
                     Err(e) => log::warn!("request_calendar_access: prompt error: {e}"),
                 }
             });
