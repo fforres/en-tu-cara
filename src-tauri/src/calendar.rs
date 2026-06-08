@@ -270,6 +270,8 @@ fn guard_eventkit<T, E: std::fmt::Display>(
 
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!("list_calendars: enter");
     let mgr = EventsManager::new();
     // ensure_authorized() can itself hit EventKit and panic-on-NULL — keep it
     // INSIDE the guard so an unguarded panic can't tear down this Tauri command
@@ -278,12 +280,18 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let calendars = guard_eventkit("list_calendars", || -> Result<_, String> {
         mgr.ensure_authorized().map_err(|e| e.to_string())?;
         mgr.list_calendars().map_err(|e| e.to_string())
-    })?;
-    Ok(calendars.iter().map(calendar_dto).collect())
+    });
+    match &calendars {
+        Ok(c) => log::info!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
+        Err(e) => log::warn!("list_calendars: failed in {}ms: {e}", t0.elapsed().as_millis()),
+    }
+    Ok(calendars?.iter().map(calendar_dto).collect())
 }
 
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
+    let t0 = std::time::Instant::now();
+    log::info!("fetch_events: enter back={days_back} fwd={days_forward}");
     let mgr = EventsManager::new();
     let now = Local::now();
     // ensure_authorized() guarded too — see list_calendars / bug H2.
@@ -295,8 +303,12 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
             None,
         )
         .map_err(|e| e.to_string())
-    })?;
-    Ok(dedup_events(events.iter().map(event_dto).collect()))
+    });
+    match &events {
+        Ok(e) => log::info!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
+        Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
+    }
+    Ok(dedup_events(events?.iter().map(event_dto).collect()))
 }
 
 /// Real-pipeline e2e (user-authorized fast test): create a REAL EventKit event

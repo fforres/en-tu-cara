@@ -246,10 +246,16 @@ fn setup_popover_panel(app: &AppHandle) -> tauri::Result<()> {
     let handler = PopoverEventHandler::new();
     let handle = app.clone();
     handler.window_did_resign_key(move |_notification| {
+        log::info!("popover: resign-key → hide");
         if let Ok(panel) = handle.get_webview_panel(POPOVER_LABEL) {
-            *LAST_POPOVER_HIDE.lock().unwrap() = Some(std::time::Instant::now());
+            // Poison-tolerant: this runs on the AppKit MAIN thread inside an ObjC
+            // callback — a panic here would unwind across the FFI boundary (UB /
+            // abort), so never `.unwrap()` a possibly-poisoned lock here.
+            *LAST_POPOVER_HIDE.lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(std::time::Instant::now());
             panel.hide();
         }
+        log::info!("popover: resign-key handler done");
     });
     panel.set_event_handler(Some(handler.as_ref()));
     Ok(())
@@ -263,24 +269,31 @@ fn toggle_popover(app: &AppHandle) {
             return;
         };
         let visible = panel.is_visible();
+        log::info!("toggle_popover: enter visible={visible}");
         if visible {
             panel.hide();
+            log::info!("toggle_popover: hidden");
             return;
         }
         // Clicking the tray while open made it resign key (→ hide) a moment ago;
         // don't re-open on the same click.
-        if let Some(t) = *LAST_POPOVER_HIDE.lock().unwrap() {
+        if let Some(t) = *LAST_POPOVER_HIDE.lock().unwrap_or_else(|e| e.into_inner()) {
             if t.elapsed() < std::time::Duration::from_millis(250) {
+                log::info!("toggle_popover: suppressed re-open (hide {}ms ago)", t.elapsed().as_millis());
                 return;
             }
         }
         if let Some(window) = app.get_webview_window(POPOVER_LABEL) {
             // Position BEFORE showing: set the native frame while hidden so the
             // panel never paints at a stale location (no first-show flicker/jump).
+            log::info!("toggle_popover: positioning");
             position_under_tray(&window);
+            log::info!("toggle_popover: window.show()");
             let _ = window.show();
+            log::info!("toggle_popover: show_and_make_key()");
             panel.show_and_make_key();
             panel.order_front_regardless();
+            log::info!("toggle_popover: shown");
         }
     }
     #[cfg(not(target_os = "macos"))]
@@ -355,6 +368,33 @@ fn position_under_tray(window: &tauri::WebviewWindow) {
         .clamp(visible.origin.x, max_x.max(visible.origin.x));
 
     ns_window.setFrame_display(frame, false);
+}
+
+/// DIAGNOSTIC: ENTUCARA_SPIKE_TOGGLE=<n> drives the popover open→close n times via
+/// the same `toggle_popover` the tray click uses, on the main thread, logging each
+/// step — so the open/close crash/hang can be reproduced without physically
+/// clicking the menu-bar icon. Temporary; remove once the bug is found.
+#[cfg(target_os = "macos")]
+pub fn maybe_run_toggle_spike(app: &AppHandle) {
+    let Ok(spec) = std::env::var("ENTUCARA_SPIKE_TOGGLE") else {
+        return;
+    };
+    let n: usize = spec.parse().unwrap_or(10);
+    let app = app.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        for i in 0..n {
+            log::info!("TOGGLE_SPIKE: cycle {i}/{n} → open");
+            let h = app.clone();
+            let _ = app.run_on_main_thread(move || toggle_popover(&h));
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            log::info!("TOGGLE_SPIKE: cycle {i}/{n} → close");
+            let h = app.clone();
+            let _ = app.run_on_main_thread(move || toggle_popover(&h));
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+        log::info!("TOGGLE_SPIKE: completed {n} cycles cleanly");
+    });
 }
 
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {

@@ -298,47 +298,57 @@ export function TrayPopover() {
     endsAt: string;
   } | null>(null);
 
+  const refreshingRef = useRef(false);
   const refresh = useCallback(async () => {
-    // Each read degrades on its own — never surface a backend failure in the
-    // popover UI. Most commonly fetch_events fails because the process has no
-    // calendar access (a bare dev binary), which should just look like "no
-    // events", not an error banner.
-    //
-    // PRESERVE-ON-FAILURE (regression fix): a transient EventKit blip makes
-    // `fetch_events` reject. Resolving that to `[]` and calling setEvents([])
-    // CLEARS the visible list — events "disappear and can't be clicked", and
-    // stay gone if later polls also blip. So a read that fails resolves to
-    // `null` and we SKIP the corresponding setState, keeping the last-good
-    // data on screen. Only a SUCCESSFUL read replaces state. Paused/ignored
-    // can safely fall back to a default (they're cheap, derived booleans/sets,
-    // not the load-bearing event list).
-    const [evs, cals, isPaused, ign] = await Promise.all([
-      invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 7 }).catch((e) => {
-        console.warn("fetch_events:", e);
-        return null;
-      }),
-      invoke<CalendarInfo[]>("list_calendars").catch((e) => {
-        console.warn("list_calendars:", e);
-        return null;
-      }),
-      invoke<boolean>("get_paused").catch((e) => {
-        console.warn("get_paused:", e);
-        return false;
-      }),
-      invoke<string[]>("get_ignored").catch((e) => {
-        console.warn("get_ignored:", e);
-        return null;
-      }),
-    ]);
-    if (evs) {
-      setEvents(evs);
+    // Coalesce overlapping refreshes: if one is already in flight (e.g. a 30s
+    // tick lands while the on-show refresh is still awaiting EventKit), skip
+    // rather than pile a second batch of fetch_events onto the command pool.
+    if (refreshingRef.current) {
+      return;
     }
-    if (cals) {
-      setCalendars(new Map(cals.map((c) => [c.id, c])));
-    }
-    setPaused(isPaused);
-    if (ign) {
-      setIgnored(new Set(ign));
+    refreshingRef.current = true;
+    try {
+      // Each read degrades on its own — never surface a backend failure in the
+      // popover UI. Most commonly fetch_events fails because the process has no
+      // calendar access (a bare dev binary), which should just look like "no
+      // events", not an error banner.
+      //
+      // PRESERVE-ON-FAILURE (regression fix): a transient EventKit blip makes
+      // `fetch_events` reject. Resolving that to `[]` and calling setEvents([])
+      // CLEARS the visible list — events "disappear and can't be clicked", and
+      // stay gone if later polls also blip. So a read that fails resolves to
+      // `null` and we SKIP the corresponding setState, keeping the last-good
+      // data on screen. Only a SUCCESSFUL read replaces state.
+      const [evs, cals, isPaused, ign] = await Promise.all([
+        invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 7 }).catch((e) => {
+          console.warn("fetch_events:", e);
+          return null;
+        }),
+        invoke<CalendarInfo[]>("list_calendars").catch((e) => {
+          console.warn("list_calendars:", e);
+          return null;
+        }),
+        invoke<boolean>("get_paused").catch((e) => {
+          console.warn("get_paused:", e);
+          return false;
+        }),
+        invoke<string[]>("get_ignored").catch((e) => {
+          console.warn("get_ignored:", e);
+          return null;
+        }),
+      ]);
+      if (evs) {
+        setEvents(evs);
+      }
+      if (cals) {
+        setCalendars(new Map(cals.map((c) => [c.id, c])));
+      }
+      setPaused(isPaused);
+      if (ign) {
+        setIgnored(new Set(ign));
+      }
+    } finally {
+      refreshingRef.current = false;
     }
   }, []);
 
@@ -407,17 +417,34 @@ export function TrayPopover() {
   useEffect(() => {
     // The popover is the always-loaded host window; it's hidden ~99% of the
     // time. Only poll EventKit + tick the countdown clock while it's actually on
-    // screen — otherwise a menu-bar app idle in the tray burns battery doing 3
-    // IPC round-trips every 30s and a full re-render every 15s for no viewer.
+    // screen — otherwise a menu-bar app idle in the tray burns battery for no
+    // viewer.
+    //
+    // CRITICAL: `focus`, `visibilitychange`, AND the mount `sync()` all signal
+    // "shown", so a single open used to fire refresh() ~3× (a fetch_events /
+    // list_calendars STORM — confirmed in logs). Under rapid open/close that
+    // floods the Tauri command pool + the React render loop and the popover
+    // freezes ("events disappear, can't click"). The `active` latch makes the
+    // become-visible transition IDEMPOTENT: exactly ONE refresh per show, no
+    // matter how many of those events fire.
     let data: ReturnType<typeof setInterval> | null = null;
     let clock: ReturnType<typeof setInterval> | null = null;
-    const start = () => {
-      void refresh(); // shown → instant freshness
+    let active = false;
+    const activate = () => {
+      if (active) {
+        return; // already shown — ignore duplicate focus/visibility signals
+      }
+      active = true;
+      void refresh(); // one refresh per show
       setNow(new Date());
       data ??= setInterval(() => void refresh(), 30_000); // poll backstop
       clock ??= setInterval(() => setNow(new Date()), 15_000);
     };
-    const stop = () => {
+    const deactivate = () => {
+      if (!active) {
+        return;
+      }
+      active = false;
       if (data !== null) {
         clearInterval(data);
         data = null;
@@ -429,15 +456,15 @@ export function TrayPopover() {
     };
     // Focus/blur is the reliable signal for a dismiss-on-blur popover.
     const sync = () =>
-      document.visibilityState === "visible" || document.hasFocus() ? start() : stop();
+      document.visibilityState === "visible" || document.hasFocus() ? activate() : deactivate();
     sync();
-    window.addEventListener("focus", start);
-    window.addEventListener("blur", stop);
+    window.addEventListener("focus", activate);
+    window.addEventListener("blur", deactivate);
     document.addEventListener("visibilitychange", sync);
     return () => {
-      stop();
-      window.removeEventListener("focus", start);
-      window.removeEventListener("blur", stop);
+      deactivate();
+      window.removeEventListener("focus", activate);
+      window.removeEventListener("blur", deactivate);
       document.removeEventListener("visibilitychange", sync);
     };
   }, [refresh]);
