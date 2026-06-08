@@ -491,6 +491,30 @@ pub fn get_paused(app: tauri::AppHandle) -> bool {
     paused
 }
 
+/// Ignore a single occurrence so it never alerts (per-occurrence — a recurring
+/// series' other instances are untouched). Right-click → Ignore in the tray.
+#[tauri::command]
+pub fn ignore_occurrence(app: tauri::AppHandle, occurrence_key: String) {
+    let now = crate::testmode::clock::now();
+    let state = app.state::<SharedState>();
+    state.update(|a| a.ignore(&occurrence_key, now));
+}
+
+/// Undo an ignore (right-click → Stop ignoring).
+#[tauri::command]
+pub fn unignore_occurrence(app: tauri::AppHandle, occurrence_key: String) {
+    let state = app.state::<SharedState>();
+    state.update(|a| a.unignore(&occurrence_key));
+}
+
+/// The occurrence_keys currently ignored — the tray reads this to dim them.
+#[tauri::command]
+pub fn get_ignored(app: tauri::AppHandle) -> Vec<String> {
+    let state = app.state::<SharedState>();
+    let keys: Vec<String> = lock_resilient(&state.alarms).ignored.keys().cloned().collect();
+    keys
+}
+
 // ---------------------------------------------------------------------------
 // CP1d spike (kept for latency re-measurement)
 // ---------------------------------------------------------------------------

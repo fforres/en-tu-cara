@@ -22,6 +22,24 @@ pub fn run() {
     // Skyward data dir (~/.config/skyward/en-tu-cara) for logs + exports.
     paths::ensure();
 
+    // eventkit-rs / objc2-event-kit PANIC (rather than error) when an EventKit
+    // call returns NULL — which happens whenever the process has no calendar
+    // access (notably a bare `tauri dev` binary, whose TCC grant is keyed to the
+    // terminal, not our bundle id; see gotcha #5). We already contain that unwind
+    // in calendar::guard_eventkit and degrade to "no events", but catch_unwind
+    // does NOT stop the default hook from printing the backtrace first — so it
+    // spams the log on every poll. Swallow exactly those (identified by the
+    // crate the panic originates in); every other panic uses the default hook.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let from_eventkit = info
+            .location()
+            .is_some_and(|l| l.file().contains("objc2-event-kit"));
+        if !from_eventkit {
+            default_hook(info);
+        }
+    }));
+
     tauri::Builder::default()
         .plugin(
             tauri_plugin_log::Builder::new()
@@ -68,6 +86,9 @@ pub fn run() {
             scheduler::dismiss_alarms,
             scheduler::set_paused,
             scheduler::get_paused,
+            scheduler::ignore_occurrence,
+            scheduler::unignore_occurrence,
+            scheduler::get_ignored,
             tray::open_settings,
             tray::maybe_show_onboarding,
             tray::finish_onboarding,
