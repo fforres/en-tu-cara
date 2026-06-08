@@ -6,21 +6,9 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { extractMeetingLink } from "../../lib/meeting-links";
+import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 import { resolveTheme, type Theme } from "./themes";
 import type { UiEvent } from "../tray/TrayPopover";
-
-/// Belt-and-suspenders before handing a calendar-derived string to the OS opener:
-/// only ever open http(s). The extractor already anchors to https?://, but a
-/// malicious invite must never coax us into a javascript:/file:/custom scheme.
-function isWebUrl(raw: string): boolean {
-  try {
-    const p = new URL(raw).protocol;
-    return p === "https:" || p === "http:";
-  } catch {
-    return false;
-  }
-}
 
 interface AlarmPayload {
   occurrence_key: string;
@@ -120,6 +108,12 @@ export function OverlayAlert() {
     });
   }, [alarms, events]);
 
+  // Key the focus effect on the card IDENTITY signature, not the count: a swap
+  // that keeps the count the same (one dismissed + one added in a single
+  // alarms-updated) must still re-run the effect, or focus strands on a removed
+  // Dismiss node and the "stray Enter can't join" guarantee lapses.
+  const cardsSignature = cards.map((c) => `${c.alarm.occurrence_key}#${c.alarm.kind}`).join("|");
+
   // Deterministic focus as cards arrive/leave (React's static autoFocus only
   // fires on a node's first mount, so it stranded focus when cards mounted after
   // the zero-card fallback). Land focus on the first Dismiss — NEVER Join, so a
@@ -135,7 +129,7 @@ export function OverlayAlert() {
       return;
     }
     root.querySelector<HTMLButtonElement>("[data-dismiss]")?.focus();
-  }, [cards.length]);
+  }, [cardsSignature]);
 
   if (role === "dim") {
     // Tint-only companion. pointer-events none + a window class that can never

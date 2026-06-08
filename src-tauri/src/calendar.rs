@@ -271,22 +271,30 @@ fn guard_eventkit<T, E: std::fmt::Display>(
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let mgr = EventsManager::new();
-    mgr.ensure_authorized().map_err(|e| e.to_string())?;
-    let calendars = guard_eventkit("list_calendars", || mgr.list_calendars())?;
+    // ensure_authorized() can itself hit EventKit and panic-on-NULL — keep it
+    // INSIDE the guard so an unguarded panic can't tear down this Tauri command
+    // handler (bug H2). The closure unifies on String so both the auth error
+    // and the fetch error flow through the same channel.
+    let calendars = guard_eventkit("list_calendars", || -> Result<_, String> {
+        mgr.ensure_authorized().map_err(|e| e.to_string())?;
+        mgr.list_calendars().map_err(|e| e.to_string())
+    })?;
     Ok(calendars.iter().map(calendar_dto).collect())
 }
 
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
     let mgr = EventsManager::new();
-    mgr.ensure_authorized().map_err(|e| e.to_string())?;
     let now = Local::now();
-    let events = guard_eventkit("fetch_events", || {
+    // ensure_authorized() guarded too — see list_calendars / bug H2.
+    let events = guard_eventkit("fetch_events", || -> Result<_, String> {
+        mgr.ensure_authorized().map_err(|e| e.to_string())?;
         mgr.fetch_events(
             now - Duration::days(days_back),
             now + Duration::days(days_forward),
             None,
         )
+        .map_err(|e| e.to_string())
     })?;
     Ok(dedup_events(events.iter().map(event_dto).collect()))
 }

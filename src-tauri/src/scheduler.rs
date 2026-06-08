@@ -408,7 +408,7 @@ pub fn demo_alert(app: tauri::AppHandle) {
     let now = crate::testmode::clock::now();
     let payload = serde_json::json!({
         "occurrence_key": "(demo @ now)",
-        "kind": "t_minus_5",
+        "kind": "t_minus5",
         "title": "Hello, I'm a demo event",
         "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
         "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
@@ -436,6 +436,14 @@ fn retain_other_occurrences(
         .filter(|p| p.get("occurrence_key").and_then(|v| v.as_str()) != Some(occurrence_key))
         .cloned()
         .collect()
+}
+
+/// Is `occurrence_key` currently presented in the overlay? Pure over the payload
+/// vec so the "drop the live card on ignore" guard is unit-testable.
+fn is_occurrence_active(active: &[serde_json::Value], occurrence_key: &str) -> bool {
+    active
+        .iter()
+        .any(|p| p.get("occurrence_key").and_then(|v| v.as_str()) == Some(occurrence_key))
 }
 
 /// Finish ONE occurrence: drop its card(s) from the active set, then close the
@@ -493,11 +501,27 @@ pub fn get_paused(app: tauri::AppHandle) -> bool {
 
 /// Ignore a single occurrence so it never alerts (per-occurrence — a recurring
 /// series' other instances are untouched). Right-click → Ignore in the tray.
+/// `ends_at` is the occurrence's END (RFC3339): the ignore is GC'd 48h after
+/// the occurrence ends, NOT 48h after the click — events ignored up to 7 days
+/// out used to silently re-arm (bug H1).
 #[tauri::command]
-pub fn ignore_occurrence(app: tauri::AppHandle, occurrence_key: String) {
-    let now = crate::testmode::clock::now();
+pub fn ignore_occurrence(app: tauri::AppHandle, occurrence_key: String, ends_at: String) {
+    // Fall back to "now" if the end can't be parsed — better a slightly-early
+    // GC than dropping the ignore entirely. The tray always supplies the end.
+    let ends_at = DateTime::parse_from_rfc3339(&ends_at)
+        .map(|d| d.with_timezone(&Utc))
+        .unwrap_or_else(|_| crate::testmode::clock::now());
     let state = app.state::<SharedState>();
-    state.update(|a| a.ignore(&occurrence_key, now));
+    state.update(|a| a.ignore(&occurrence_key, ends_at));
+
+    // If that occurrence is CURRENTLY on screen, ignoring it must also drop the
+    // live card (and stop the sound / close the overlay if it was the last one) —
+    // otherwise the card stays up and the alert loops despite being ignored.
+    // Guard on "is it actually active" so we never needlessly close_overlays /
+    // stop the loop when nothing for this key is showing.
+    if is_occurrence_active(&lock_resilient(&ACTIVE_ALARMS), &occurrence_key) {
+        finish_one(&app, &occurrence_key);
+    }
 }
 
 /// Undo an ignore (right-click → Stop ignoring).
@@ -628,6 +652,21 @@ mod tests {
         let remaining = retain_other_occurrences(&active, "(A @ t)");
         assert_eq!(remaining.len(), 1, "only B should remain after dismissing A");
         assert_eq!(remaining[0]["occurrence_key"], "(B @ t)");
+    }
+
+    #[test]
+    fn is_occurrence_active_detects_a_live_card() {
+        // The ignore path uses this to decide whether to also drop the live card:
+        // true → finish_one (close/re-render + stop sound); false → leave overlay
+        // untouched. A key with ANY card on screen (even a different kind) is active.
+        let active = vec![
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
+        ];
+        assert!(is_occurrence_active(&active, "(A @ t)"));
+        assert!(is_occurrence_active(&active, "(B @ t)"));
+        assert!(!is_occurrence_active(&active, "(C @ t)"), "absent key is not active");
+        assert!(!is_occurrence_active(&[], "(A @ t)"), "empty set: nothing is active");
     }
 
     #[test]

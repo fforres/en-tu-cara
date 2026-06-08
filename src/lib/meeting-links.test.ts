@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { extractMeetingLink } from "./meeting-links";
+import { extractMeetingLink, isWebUrl } from "./meeting-links";
 
 // Fixture matrix: each provider × {url-field, location, notes} +
 // adversarial cases. Bodies modeled on real invite formats.
@@ -99,5 +99,23 @@ describe("extractMeetingLink — adversarial cases", () => {
   it("empty/null fields tolerated", () => {
     expect(extractMeetingLink({})).toBeNull();
     expect(extractMeetingLink({ url: null, location: null, notes: null })).toBeNull();
+  });
+});
+
+describe("isWebUrl — opener scheme guard", () => {
+  it("accepts https", () => {
+    expect(isWebUrl("https://x")).toBe(true);
+  });
+  it("accepts http", () => {
+    expect(isWebUrl("http://x")).toBe(true);
+  });
+  it("rejects javascript: scheme", () => {
+    expect(isWebUrl("javascript:alert(1)")).toBe(false);
+  });
+  it("rejects file: scheme", () => {
+    expect(isWebUrl("file:///etc")).toBe(false);
+  });
+  it("rejects non-URL garbage", () => {
+    expect(isWebUrl("not a url")).toBe(false);
   });
 });

@@ -108,3 +108,19 @@ export function extractMeetingLink(event: {
   }
   return null;
 }
+
+/**
+ * Belt-and-suspenders before handing a calendar-derived string to the OS opener:
+ * only ever open http(s). The extractor already anchors to https?://, but a
+ * malicious invite must never coax us into a javascript:/file:/custom scheme.
+ * Guard every `openUrl(...)` sink (overlay Join, tray row-click / "Open in
+ * browser") with this.
+ */
+export function isWebUrl(raw: string): boolean {
+  try {
+    const p = new URL(raw).protocol;
+    return p === "https:" || p === "http:";
+  } catch {
+    return false;
+  }
+}

@@ -84,4 +84,36 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
       expect(focused?.getAttributeNames?.()).toContain("data-dismiss");
     });
   });
+
+  it("re-lands focus on Dismiss when the card set swaps without changing count", async () => {
+    render(<OverlayAlert />);
+    await screen.findByText("Standup");
+    // Park focus on B's Dismiss (the card about to be removed), simulating the
+    // user having tabbed to it. The component's "don't steal focus if the user is
+    // already on one of our buttons" guard means it leaves this alone.
+    const dismissButtons = screen.getAllByText("Dismiss");
+    act(() => dismissButtons[dismissButtons.length - 1].focus());
+    // Swap the set without changing the count: [A,B] -> [A,C]. Keyed on
+    // cards.length the focus effect wouldn't re-run, so focus strands on B's
+    // removed Dismiss node (activeElement falls back to <body>, no data-dismiss).
+    // Keyed on card identity the effect re-runs and re-lands focus on a live one.
+    const ALARM_C = {
+      occurrence_key: "(C @ t)",
+      kind: "t_zero",
+      title: "Retro",
+      start: null,
+      end: null,
+    };
+    await act(async () => {
+      listeners.get("alarms-updated")?.({ payload: [ALARM_A, ALARM_C] });
+    });
+    await screen.findByText("Retro");
+    expect(screen.queryByText("1:1")).not.toBeInTheDocument();
+    await waitFor(() => {
+      const focused = document.activeElement as HTMLElement | null;
+      // Focus must be on a LIVE Dismiss button (one still attached to the document).
+      expect(focused?.getAttributeNames?.()).toContain("data-dismiss");
+      expect(document.body.contains(focused)).toBe(true);
+    });
+  });
 });

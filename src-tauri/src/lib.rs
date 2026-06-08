@@ -28,14 +28,23 @@ pub fn run() {
     // terminal, not our bundle id; see gotcha #5). We already contain that unwind
     // in calendar::guard_eventkit and degrade to "no events", but catch_unwind
     // does NOT stop the default hook from printing the backtrace first — so it
-    // spams the log on every poll. Swallow exactly those (identified by the
-    // crate the panic originates in); every other panic uses the default hook.
+    // spams the log on every poll.
+    //
+    // Narrow the swallow to EXACTLY that benign NULL-on-no-access read panic,
+    // identified by its payload message ("unexpected NULL returned" — objc2's
+    // signature when a non-null return is None). Keying on the source FILE
+    // (`objc2-event-kit`) was too broad: it also hid genuine bugs in that crate,
+    // e.g. a panic on the real-e2e event-CREATION write path. Every other panic
+    // — including other objc2-event-kit panics — goes through the default hook.
     let default_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
-        let from_eventkit = info
-            .location()
-            .is_some_and(|l| l.file().contains("objc2-event-kit"));
-        if !from_eventkit {
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
+        let is_eventkit_null = payload.is_some_and(|p| p.contains("unexpected NULL returned"));
+        if !is_eventkit_null {
             default_hook(info);
         }
     }));
@@ -93,6 +102,7 @@ pub fn run() {
             tray::maybe_show_onboarding,
             tray::finish_onboarding,
             tray::open_url,
+            tray::open_in_calendar,
             tray::hide_popover,
             settings::get_settings,
             settings::set_settings,

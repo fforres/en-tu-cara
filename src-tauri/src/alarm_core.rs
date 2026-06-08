@@ -69,9 +69,12 @@ pub struct AlarmState {
     pub fired: HashMap<String, DateTime<Utc>>,
     /// occurrence_key → snooze deadline. Cleared when fired.
     pub snoozes: HashMap<String, DateTime<Utc>>,
-    /// occurrence_key → ignored-at. Ignored occurrences never alert (T-5/T-0/
-    /// snooze all suppressed). Keyed by the OCCURRENCE (event_id @ start), so
-    /// ignoring one instance never touches the rest of a recurring series.
+    /// occurrence_key → occurrence END. Ignored occurrences never alert (T-5/
+    /// T-0/snooze all suppressed). Keyed by the OCCURRENCE (event_id @ start),
+    /// so ignoring one instance never touches the rest of a recurring series.
+    /// The value is the occurrence's end (NOT ignored-at) so `gc` only drops an
+    /// ignore 48h after the occurrence ENDS — the tray lets users ignore events
+    /// up to 7 days out, and an ignored-at age would silently re-arm them.
     pub ignored: HashMap<String, DateTime<Utc>>,
     pub paused: bool,
 }
@@ -97,8 +100,10 @@ impl AlarmState {
     }
     /// Ignore one occurrence so it never alerts. Per-occurrence: ignoring one
     /// instance of a recurring meeting leaves every other instance alone.
-    pub fn ignore(&mut self, occurrence_key: &str, at: DateTime<Utc>) {
-        self.ignored.insert(occurrence_key.to_string(), at);
+    /// `ends_at` is the occurrence's END — stored so `gc` keeps the ignore
+    /// alive until 48h after the occurrence ends (not 48h after it was clicked).
+    pub fn ignore(&mut self, occurrence_key: &str, ends_at: DateTime<Utc>) {
+        self.ignored.insert(occurrence_key.to_string(), ends_at);
     }
     pub fn unignore(&mut self, occurrence_key: &str) {
         self.ignored.remove(occurrence_key);
@@ -107,12 +112,14 @@ impl AlarmState {
         self.ignored.contains_key(occurrence_key)
     }
     /// Drop state for occurrences that ended > 48 h ago (GC rule).
-    /// Keys embed the occurrence; we GC by fired-at age as the proxy.
+    /// `fired`/`snoozes` GC by their stored timestamp as the proxy; `ignored`
+    /// GCs by the occurrence END it stores, so an ignore set on an event days
+    /// out is never dropped before that event is well past.
     pub fn gc(&mut self, now: DateTime<Utc>) {
         let cutoff = now - Duration::hours(48);
         self.fired.retain(|_, at| *at > cutoff);
         self.snoozes.retain(|_, until| *until > cutoff);
-        self.ignored.retain(|_, at| *at > cutoff);
+        self.ignored.retain(|_, ends_at| *ends_at > cutoff);
     }
 }
 
@@ -504,15 +511,39 @@ mod tests {
     }
 
     #[test]
-    fn ignore_survives_restart_and_gc_drops_old() {
+    fn ignore_persists_across_restart() {
         let mut state = AlarmState::default();
-        state.ignore("(r @ t1)", t(0));
+        // Ignored value is the occurrence END.
+        state.ignore("(r @ t1)", t(1200));
         let state: AlarmState =
             serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
         assert!(state.is_ignored("(r @ t1)"), "ignore persists across restart");
-        let mut state = state;
-        state.gc(t(49 * 3600));
-        assert!(!state.is_ignored("(r @ t1)"), "stale ignore GC'd after 48h");
+    }
+
+    #[test]
+    fn ignore_with_future_end_survives_gc_run_long_after_set() {
+        // Bug H1: an event ignored up to 7 days out used to be GC'd 48h after it
+        // was CLICKED — re-arming a meeting the user explicitly silenced. The
+        // stored value is now the occurrence END, GC'd only 48h after that end.
+        let mut state = AlarmState::default();
+        // Occurrence ends 5 days out; user ignored it now (t(0)).
+        let ends_at = t(5 * 24 * 3600);
+        state.ignore("(future @ t)", ends_at);
+        // GC runs 3 days later (well past the 48h-since-click threshold).
+        state.gc(t(3 * 24 * 3600));
+        assert!(
+            state.is_ignored("(future @ t)"),
+            "ignore of a still-future occurrence must survive gc",
+        );
+    }
+
+    #[test]
+    fn ignore_with_old_end_is_gc_dropped() {
+        // An ignore whose occurrence ENDED > 48h ago is stale and gets dropped.
+        let mut state = AlarmState::default();
+        state.ignore("(past @ t)", t(0)); // occurrence ended at base
+        state.gc(t(49 * 3600)); // 49h after the end
+        assert!(!state.is_ignored("(past @ t)"), "stale ignore (end >48h ago) GC'd");
     }
 
     #[test]

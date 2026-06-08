@@ -4,7 +4,7 @@
 // Rendered in the `popover` NSPanel window (App.tsx), shown under the tray icon
 // on left-click (src-tauri/src/tray.rs). Right-click the tray for the menu.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
@@ -13,9 +13,11 @@ import {
   ongoingSorted,
   remainingLabel,
 } from "../../lib/classify";
-import { extractMeetingLink } from "../../lib/meeting-links";
+import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 
 export interface UiEvent {
+  /** EKEvent identifier (event.eventIdentifier) — used for the ical:// deep-link. */
+  id: string;
   occurrence_key: string;
   title: string;
   start: string;
@@ -117,27 +119,53 @@ function EventRow({
   ongoing?: boolean;
   ignored: boolean;
   calendar?: CalendarInfo;
-  onContextMenu: (x: number, y: number, occurrenceKey: string, link: string | null) => void;
+  onContextMenu: (
+    x: number,
+    y: number,
+    occurrenceKey: string,
+    eventId: string,
+    link: string | null,
+    endsAt: string,
+  ) => void;
 }) {
   const link = useMemo(() => extractMeetingLink(event), [event]);
-  const open = () => {
-    if (link) {
+  // The videocall/join link (button + right-click "Open in browser").
+  const openVideocall = () => {
+    if (link && isWebUrl(link.url)) {
       void openUrl(link.url).catch(() => {});
+    }
+  };
+  // Row-click opens the calendar event ON THE WEB. EventKit only gives us
+  // EKEvent.URL (event.url) — there is NO separate provider "view event on the
+  // web" link — so the best feasible behavior is: open event.url when it's a
+  // web URL, else no-op. (For many Meet/Zoom invites event.url is empty or the
+  // same join link; see report.)
+  const webUrl = event.url && isWebUrl(event.url) ? event.url : null;
+  const openWebEvent = () => {
+    if (webUrl) {
+      void openUrl(webUrl).catch(() => {});
     }
   };
   const origin = calendarOrigin(event, calendar);
   return (
     <div
-      onClick={open}
+      onClick={openWebEvent}
       onContextMenu={(e) => {
         e.preventDefault();
-        onContextMenu(e.clientX, e.clientY, event.occurrence_key, link?.url ?? null);
+        onContextMenu(
+          e.clientX,
+          e.clientY,
+          event.occurrence_key,
+          event.id,
+          link?.url ?? null,
+          event.end,
+        );
       }}
       title={
         ignored
           ? "Ignored — right-click to stop ignoring"
-          : link
-            ? "Open meeting · right-click for options"
+          : webUrl
+            ? "Open event on the web · right-click for options"
             : "Right-click for options"
       }
       style={{
@@ -146,7 +174,7 @@ function EventRow({
         gap: 8,
         padding: "6px 12px",
         borderLeft: `3px solid transparent`,
-        cursor: link ? "pointer" : "context-menu",
+        cursor: webUrl ? "pointer" : "context-menu",
         opacity: ignored ? 0.45 : 1,
       }}
     >
@@ -222,7 +250,7 @@ function EventRow({
             <button
               onClick={(e) => {
                 e.stopPropagation();
-                open();
+                openVideocall();
               }}
               style={{
                 flexShrink: 0,
@@ -237,7 +265,7 @@ function EventRow({
                 cursor: "pointer",
               }}
             >
-              Go to event
+              Open videocall
             </button>
           )}
         </div>
@@ -253,12 +281,21 @@ export function TrayPopover() {
   const [todayOnly, setTodayOnly] = useState(false);
   const [paused, setPaused] = useState(false);
   const [ignored, setIgnored] = useState<Set<string>>(new Set());
+  // Mirror of `ignored` so toggleIgnore decides direction from CURRENT state
+  // (not a stale closure) without depending on `ignored` — a fast click can't
+  // send the wrong command (bug H3b).
+  const ignoredRef = useRef(ignored);
+  useEffect(() => {
+    ignoredRef.current = ignored;
+  }, [ignored]);
   // Right-click context menu: which occurrence + where to render it.
   const [menu, setMenu] = useState<{
     key: string;
+    eventId: string;
     x: number;
     y: number;
     link: string | null;
+    endsAt: string;
   } | null>(null);
 
   const refresh = useCallback(async () => {
@@ -266,45 +303,87 @@ export function TrayPopover() {
     // popover UI. Most commonly fetch_events fails because the process has no
     // calendar access (a bare dev binary), which should just look like "no
     // events", not an error banner.
+    //
+    // PRESERVE-ON-FAILURE (regression fix): a transient EventKit blip makes
+    // `fetch_events` reject. Resolving that to `[]` and calling setEvents([])
+    // CLEARS the visible list — events "disappear and can't be clicked", and
+    // stay gone if later polls also blip. So a read that fails resolves to
+    // `null` and we SKIP the corresponding setState, keeping the last-good
+    // data on screen. Only a SUCCESSFUL read replaces state. Paused/ignored
+    // can safely fall back to a default (they're cheap, derived booleans/sets,
+    // not the load-bearing event list).
     const [evs, cals, isPaused, ign] = await Promise.all([
-      invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 7 }).catch(
-        () => [] as UiEvent[],
-      ),
-      invoke<CalendarInfo[]>("list_calendars").catch(() => [] as CalendarInfo[]),
-      invoke<boolean>("get_paused").catch(() => false),
-      invoke<string[]>("get_ignored").catch(() => [] as string[]),
+      invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 7 }).catch((e) => {
+        console.warn("fetch_events:", e);
+        return null;
+      }),
+      invoke<CalendarInfo[]>("list_calendars").catch((e) => {
+        console.warn("list_calendars:", e);
+        return null;
+      }),
+      invoke<boolean>("get_paused").catch((e) => {
+        console.warn("get_paused:", e);
+        return false;
+      }),
+      invoke<string[]>("get_ignored").catch((e) => {
+        console.warn("get_ignored:", e);
+        return null;
+      }),
     ]);
-    setEvents(evs);
-    setCalendars(new Map(cals.map((c) => [c.id, c])));
+    if (evs) {
+      setEvents(evs);
+    }
+    if (cals) {
+      setCalendars(new Map(cals.map((c) => [c.id, c])));
+    }
     setPaused(isPaused);
-    setIgnored(new Set(ign));
+    if (ign) {
+      setIgnored(new Set(ign));
+    }
   }, []);
 
   const openMenu = useCallback(
-    (x: number, y: number, key: string, link: string | null) => setMenu({ key, x, y, link }),
+    (x: number, y: number, key: string, eventId: string, link: string | null, endsAt: string) =>
+      setMenu({ key, eventId, x, y, link, endsAt }),
     [],
   );
 
-  const toggleIgnore = useCallback(
-    (key: string) => {
-      const isIgnored = ignored.has(key);
-      const cmd = isIgnored ? "unignore_occurrence" : "ignore_occurrence";
-      // Optimistic: flip locally now, persist in the backend (outside the state
-      // updater so StrictMode can't double-fire the command).
+  const toggleIgnore = useCallback((key: string, endsAt: string) => {
+    // Direction comes from the ref (current state), not a stale closure — a
+    // fast click can't send the wrong command (H3b). invoke runs OUTSIDE the
+    // setState updater so StrictMode's double-invoke of the updater can't
+    // double-fire the command (H3 / mirrors SettingsWindow.update).
+    const wasIgnored = ignoredRef.current.has(key);
+    const cmd = wasIgnored ? "unignore_occurrence" : "ignore_occurrence";
+    // Optimistic flip.
+    setIgnored((prev) => {
+      const next = new Set(prev);
+      if (wasIgnored) {
+        next.delete(key);
+      } else {
+        next.add(key);
+      }
+      return next;
+    });
+    // ignore_occurrence needs the occurrence end so the backend GCs the ignore
+    // 48h after the event ends, not 48h after the click (H1).
+    const args = wasIgnored ? { occurrenceKey: key } : { occurrenceKey: key, endsAt };
+    void invoke(cmd, args).catch((e) => {
+      console.warn("toggle ignore:", e);
+      // Revert the optimistic flip — a failed write must not leave the row
+      // claiming IGNORED while the alarm still fires (H3a / mirrors toggleLogin).
       setIgnored((prev) => {
         const next = new Set(prev);
-        if (isIgnored) {
-          next.delete(key);
-        } else {
+        if (wasIgnored) {
           next.add(key);
+        } else {
+          next.delete(key);
         }
         return next;
       });
-      void invoke(cmd, { occurrenceKey: key }).catch((e) => console.warn("toggle ignore:", e));
-      setMenu(null);
-    },
-    [ignored],
-  );
+    });
+    setMenu(null);
+  }, []);
 
   // Dismiss the context menu on Escape or when the popover loses focus (it hides
   // on blur, so a stale menu must not linger into the next open).
@@ -547,7 +626,12 @@ export function TrayPopover() {
             style={{
               position: "fixed",
               left: Math.min(menu.x, window.innerWidth - 180),
-              top: Math.min(menu.y, window.innerHeight - 48),
+              // Clamp against the menu's ACTUAL height. Always-present items:
+              // "Open in local calendar" + "Ignore" (~72px). With a link it also
+              // carries Open in browser + Copy link + a divider (+~73px). A flat
+              // value let the link-bearing menu overflow off the bottom on a
+              // near-bottom right-click. ~32px/item + 8px padding + 9px divider.
+              top: Math.min(menu.y, window.innerHeight - (menu.link ? 145 : 72)),
               zIndex: 51,
               minWidth: 168,
               background: "Canvas",
@@ -563,7 +647,7 @@ export function TrayPopover() {
                   onClick={() => {
                     const url = menu.link;
                     setMenu(null);
-                    if (url) {
+                    if (url && isWebUrl(url)) {
                       void openUrl(url).catch((e) => console.warn("open in browser:", e));
                     }
                   }}
@@ -592,7 +676,22 @@ export function TrayPopover() {
                 />
               </>
             )}
-            <button onClick={() => toggleIgnore(menu.key)} style={menuItemStyle}>
+            {/* Always available: a calendar event always exists (unlike a video
+                link). Opens the event in macOS Calendar.app via the ical://
+                ekevent deep-link (backend command). */}
+            <button
+              onClick={() => {
+                const eventId = menu.eventId;
+                setMenu(null);
+                void invoke("open_in_calendar", { eventId }).catch((e) =>
+                  console.warn("open in local calendar:", e),
+                );
+              }}
+              style={menuItemStyle}
+            >
+              Open in local calendar
+            </button>
+            <button onClick={() => toggleIgnore(menu.key, menu.endsAt)} style={menuItemStyle}>
               {ignored.has(menu.key) ? "Stop ignoring this event" : "Ignore this event"}
             </button>
           </div>

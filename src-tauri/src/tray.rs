@@ -157,6 +157,24 @@ pub fn open_url(app: AppHandle, url: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Open an event in macOS Calendar.app.
+///
+/// macOS supports a deep-link scheme `ical://ekevent/<eventIdentifier>?method=
+/// show&options=more` that selects the specific event in Calendar.app. Our
+/// `EventDto.id` IS that `eventIdentifier` (calendar.rs maps it from
+/// `event.eventIdentifier()`), so a PRECISE deep-link is feasible — no fallback
+/// to merely opening Calendar.app is needed. We open it through the opener
+/// plugin (same sink as `open_url`); the OS routes the `ical://` scheme to
+/// Calendar.app.
+#[tauri::command]
+pub fn open_in_calendar(app: AppHandle, event_id: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    let url = format!("ical://ekevent/{event_id}?method=show&options=more");
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
 /// Hide the popover (called from the cog menu before opening settings, so the
 /// popover doesn't linger behind the settings window).
 #[tauri::command]
