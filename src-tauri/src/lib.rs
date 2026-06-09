@@ -134,6 +134,7 @@ pub fn run() {
             tray::open_url,
             tray::open_in_calendar,
             tray::hide_popover,
+            tray::refresh_popover,
             settings::get_settings,
             settings::set_settings,
             settings::preview_sound,

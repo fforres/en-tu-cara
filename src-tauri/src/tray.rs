@@ -194,6 +194,88 @@ pub fn set_tray_title(app: &AppHandle, title: Option<String>) {
     }
 }
 
+/// Minimal projection of an event for the menu-bar title. Both `AlarmEvent`
+/// (the scheduler heartbeat) and `EventDto` (the popover refresh) map to this,
+/// so the title is ONE derivation over whichever path refreshed last — it can
+/// never drift from the list the popover shows.
+pub struct MenuBarCandidate<'a> {
+    pub title: &'a str,
+    pub start: chrono::DateTime<chrono::Utc>,
+    pub all_day: bool,
+    pub status: &'a str,
+}
+
+/// THE single source of the menu-bar "next event" title: pick the soonest
+/// upcoming, non-all-day, non-canceled event and format it as "Title… · 12m"
+/// (or "1h05m"). `None` when nothing qualifies. Pure + testable; called from the
+/// scheduler tick AND `refresh_popover` so the two can't compute it differently.
+pub fn next_event_title(
+    candidates: &[MenuBarCandidate],
+    now: chrono::DateTime<chrono::Utc>,
+    max_chars: usize,
+) -> Option<String> {
+    candidates
+        .iter()
+        .filter(|c| !c.all_day && c.status != "canceled" && c.start > now)
+        .min_by_key(|c| c.start)
+        .map(|c| {
+            let mins = (c.start - now).num_minutes();
+            let when = if mins >= 60 {
+                format!("{}h{:02}m", mins / 60, mins % 60)
+            } else {
+                format!("{}m", mins.max(1))
+            };
+            let max = max_chars.max(4);
+            let label = if c.title.chars().count() > max {
+                let mut s: String = c.title.chars().take(max - 1).collect();
+                s.push('…');
+                s
+            } else {
+                c.title.to_string()
+            };
+            format!("{label} · {when}")
+        })
+}
+
+/// The popover's single on-open/refresh read: fetch upcoming events AND refresh
+/// the menu-bar title from the SAME list, in one round-trip. This is what kills
+/// the title-lags-behind-the-list drift — the title now lands at the same instant
+/// as the list, derived by the same `next_event_title` the background heartbeat
+/// uses. The scheduler heartbeat still updates the title while the popover is
+/// closed; both are the same computation, just triggered at different times.
+#[tauri::command]
+pub fn refresh_popover(
+    app: AppHandle,
+    days_back: i64,
+    days_forward: i64,
+) -> Result<Vec<crate::calendar::EventDto>, String> {
+    let events = crate::calendar::fetch_events(days_back, days_forward)?;
+    let settings = app.state::<crate::settings::SettingsStore>().get();
+    let title = if settings.show_next_event_in_menu_bar {
+        let now = crate::testmode::clock::now();
+        let candidates: Vec<MenuBarCandidate> = events
+            .iter()
+            .filter_map(|e| {
+                Some(MenuBarCandidate {
+                    title: &e.title,
+                    start: chrono::DateTime::parse_from_rfc3339(&e.start)
+                        .ok()?
+                        .with_timezone(&chrono::Utc),
+                    all_day: e.all_day,
+                    status: &e.status,
+                })
+            })
+            .collect();
+        next_event_title(&candidates, now, settings.menu_bar_title_chars as usize)
+    } else {
+        None
+    };
+    // Runs on the main thread (Tauri IPC) — set the title directly, like the
+    // scheduler does via run_on_main_thread.
+    set_tray_title(&app, title);
+    Ok(events)
+}
+
 /// Swap the menu-bar icon style live (Settings → Menu Bar → Tray icon).
 /// "light"/"dark" force a fixed glyph; anything else ("auto") uses the template
 /// that adapts to the light/dark menu bar. Glyphs are embedded at compile time.
@@ -412,4 +494,50 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_event_title, MenuBarCandidate};
+    use chrono::{DateTime, Utc};
+
+    fn at(rfc: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn picks_soonest_future_skipping_all_day_canceled_and_past() {
+        let now = at("2026-06-08T09:00:00Z");
+        let cands = vec![
+            MenuBarCandidate { title: "Past", start: at("2026-06-08T08:30:00Z"), all_day: false, status: "confirmed" },
+            MenuBarCandidate { title: "AllDay", start: at("2026-06-08T09:05:00Z"), all_day: true, status: "confirmed" },
+            MenuBarCandidate { title: "Canceled", start: at("2026-06-08T09:03:00Z"), all_day: false, status: "canceled" },
+            MenuBarCandidate { title: "Standup", start: at("2026-06-08T09:05:00Z"), all_day: false, status: "confirmed" },
+            MenuBarCandidate { title: "Later", start: at("2026-06-08T10:00:00Z"), all_day: false, status: "confirmed" },
+        ];
+        assert_eq!(next_event_title(&cands, now, 20).as_deref(), Some("Standup · 5m"));
+    }
+
+    #[test]
+    fn formats_hours_and_truncates_long_titles() {
+        let now = at("2026-06-08T09:00:00Z");
+        let cands = vec![MenuBarCandidate {
+            title: "Quarterly planning sync",
+            start: at("2026-06-08T10:05:00Z"), // 65 min out
+            all_day: false,
+            status: "confirmed",
+        }];
+        // 65 min → "1h05m"; 10-char cap → 9 chars + ellipsis.
+        assert_eq!(next_event_title(&cands, now, 10).unwrap(), "Quarterly… · 1h05m");
+    }
+
+    #[test]
+    fn none_when_nothing_upcoming() {
+        let now = at("2026-06-08T09:00:00Z");
+        let past = vec![MenuBarCandidate {
+            title: "Past", start: at("2026-06-08T08:00:00Z"), all_day: false, status: "confirmed",
+        }];
+        assert!(next_event_title(&past, now, 20).is_none());
+        assert!(next_event_title(&[], now, 20).is_none());
+    }
 }
