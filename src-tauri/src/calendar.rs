@@ -195,6 +195,22 @@ mod tests {
     }
 
     #[test]
+    fn calendar_enabled_governs_what_the_user_sees() {
+        // None enabled-set = every calendar shows (the default).
+        assert!(calendar_enabled(&None, Some("work")));
+        assert!(calendar_enabled(&None, None));
+        // An explicit set includes only listed calendars…
+        let enabled = Some(vec!["work".to_string(), "personal".to_string()]);
+        assert!(calendar_enabled(&enabled, Some("work")));
+        assert!(
+            !calendar_enabled(&enabled, Some("buffer")),
+            "a disabled calendar's events must be filtered out (the popover bug)"
+        );
+        // …but an event with no calendar id is never silently dropped.
+        assert!(calendar_enabled(&enabled, None));
+    }
+
+    #[test]
     fn dedup_prefers_row_with_my_rsvp() {
         // CP1a real-data case: same meeting via a colleague's subscribed calendar
         // (no rsvp) and via the user's own calendar (rsvp present).
@@ -430,11 +446,11 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
-    // Sync before reading so externally deleted/edited events don't linger: the
-    // tray popover invokes this command directly (it does NOT go through the
-    // scheduler tick that already calls sync_event_store), so without this the
-    // popover served whatever this process cached on first access. Cheap:
-    // refreshSourcesIfNecessary is a no-op when nothing changed, reset is local.
+    // Sync before reading so externally deleted/edited events don't linger.
+    // EVERY event read (popover and scheduler) goes through here via
+    // `active_events`, so this is the one sync point — callers must not sync
+    // again. Cheap: refreshSourcesIfNecessary is a no-op when nothing changed,
+    // reset is local.
     sync_event_store();
     let mgr = EventsManager::new();
     let now = Local::now();
@@ -446,6 +462,34 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
     Ok(dedup_events(events?.iter().map(event_dto).collect()))
+}
+
+/// Is an event's calendar enabled for alerts/listing? `None` enabled-set means
+/// "all calendars"; an event with no calendar id is never silently dropped. Pure
+/// so the one rule that decides what the user sees is unit-tested.
+pub fn calendar_enabled(enabled: &Option<Vec<String>>, calendar_id: Option<&str>) -> bool {
+    match (enabled, calendar_id) {
+        (Some(enabled), Some(cal)) => enabled.iter().any(|c| c == cal),
+        (Some(_), None) => true,
+        (None, _) => true,
+    }
+}
+
+/// THE canonical event read for the whole app: `fetch_events` (sync + dedup) then
+/// drop anything from a calendar the user disabled. The tray popover, the
+/// menu-bar title, and the alarm scheduler all read through here — so the list
+/// you see, the "next event" countdown, and what can fire an alert can never
+/// disagree about which events exist. Disabling a calendar takes effect the next
+/// time any of them reads (e.g. reopening the tray).
+pub fn active_events(
+    enabled_calendar_ids: &Option<Vec<String>>,
+    days_back: i64,
+    days_forward: i64,
+) -> Result<Vec<EventDto>, String> {
+    Ok(fetch_events(days_back, days_forward)?
+        .into_iter()
+        .filter(|e| calendar_enabled(enabled_calendar_ids, e.calendar_id.as_deref()))
+        .collect())
 }
 
 /// Real-pipeline e2e (user-authorized fast test): create a REAL EventKit event

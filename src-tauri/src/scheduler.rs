@@ -227,27 +227,21 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
             return env_events;
         }
     }
-    // Sync the event store (pull remote changes + drop the stale local cache),
-    // then read — so external deletes/edits are reflected (freshness; ≤1 min cadence).
-    crate::calendar::sync_event_store();
-    // EventKit fetch: 1 day back (ongoing events started earlier) + 2 forward.
-    // The forward window is 2 days, not 1, so a DST "spring forward" day (a 23h
-    // wall-clock day) can never clip the next 24h of events out of the query.
-    // Over-fetching is free — compute_actions filters by time.
-    let fetched = crate::calendar::fetch_events(1, 2);
-    if let Err(ref e) = fetched {
+    // THE canonical event read (sync + dedup + enabled-calendar filter), shared
+    // with the tray popover — so the menu-bar title, the popover list, and what
+    // can alarm never disagree. EventKit window: 1 day back (ongoing events
+    // started earlier) + 2 forward (2, not 1, so a DST "spring forward" 23h day
+    // can't clip the next 24h); over-fetching is free, compute_actions filters by
+    // time.
+    let events = crate::calendar::active_events(&settings.enabled_calendar_ids, 1, 2);
+    if let Err(ref e) = events {
         // A read failing here means the alarm pipeline is starved — record it
         // (reason only; no event content is involved in a failed read).
         crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
     }
-    fetched
+    events
         .unwrap_or_default()
         .into_iter()
-        .filter(|e| match (&settings.enabled_calendar_ids, &e.calendar_id) {
-            (Some(enabled), Some(cal)) => enabled.contains(cal),
-            (Some(_), None) => true, // no calendar id — never silently drop
-            (None, _) => true,
-        })
         .filter_map(|e| {
             Some(AlarmEvent {
                 start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),

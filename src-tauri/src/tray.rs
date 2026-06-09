@@ -312,13 +312,19 @@ pub fn next_event_title(
 /// as the list, derived by the same `next_event_title` the background heartbeat
 /// uses. The scheduler heartbeat still updates the title while the popover is
 /// closed; both are the same computation, just triggered at different times.
+///
+/// Reads through `calendar::active_events` (the SAME canonical, enabled-calendar
+/// filtered source the scheduler uses), so a calendar disabled in Settings drops
+/// out of the popover list the next time it opens — it no longer shows events
+/// from disabled calendars.
 #[tauri::command]
 pub fn refresh_popover(
     app: AppHandle,
     days_back: i64,
     days_forward: i64,
 ) -> Result<Vec<crate::calendar::EventDto>, String> {
-    let events = crate::calendar::fetch_events(days_back, days_forward)?;
+    let enabled = app.state::<crate::settings::SettingsStore>().get().enabled_calendar_ids;
+    let events = crate::calendar::active_events(&enabled, days_back, days_forward)?;
     // Refresh the menu-bar snapshot from the SAME events the popover shows, then
     // re-derive the title — one derivation, so the title can't drift from the
     // list, and the short-interval loop keeps it fresh from this same snapshot.
