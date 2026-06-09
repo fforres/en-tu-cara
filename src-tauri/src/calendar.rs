@@ -242,8 +242,10 @@ mod tests {
 /// sync daemon, but the actual server-fetch cadence for CalDAV accounts is the
 /// per-account "Refresh Calendars" interval (Calendar.app ▸ Settings ▸ Accounts;
 /// minimum "Every minute" is NOT offered — 5 min is the floor, 15 the default).
-/// Documented in README + settings description.
-pub fn sync_event_store() {
+/// Documented in README + settings description. Private: every read now goes
+/// through `fetch_events` (the single sync point), so nothing outside this
+/// module needs to sync separately.
+fn sync_event_store() {
     use objc2::rc::Retained;
     use objc2_event_kit::EKEventStore;
     // EKEventStore is !Send. A thread_local gives each CALLING thread its own
