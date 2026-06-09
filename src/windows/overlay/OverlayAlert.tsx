@@ -74,9 +74,26 @@ export function OverlayAlert() {
     // and emits the reduced set so the remaining cards (e.g. an overlapping
     // meeting) stay visible. Replace, don't append.
     const unlistenUpdated = listen<AlarmPayload[]>("alarms-updated", (e) => setAlarms(e.payload));
-    invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 1 })
-      .then(setEvents)
-      .catch(() => {});
+    // The Join link is resolved from a SEPARATE fetch_events (the alarm payload
+    // carries no URL). A transient EventKit blip here used to leave events empty
+    // for the life of the overlay → no Join button, exactly when the user most
+    // needs it (M4). Retry a FAILED read a few times with a short backoff; a
+    // successful read (even an empty one) is authoritative and ends the retries.
+    let eventsCancelled = false;
+    const fetchEventsWithRetry = (attempt: number) => {
+      invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 1 })
+        .then((evs) => {
+          if (!eventsCancelled) {
+            setEvents(evs);
+          }
+        })
+        .catch(() => {
+          if (!eventsCancelled && attempt < 5) {
+            setTimeout(() => fetchEventsWithRetry(attempt + 1), 1000);
+          }
+        });
+    };
+    fetchEventsWithRetry(0);
     invoke<SettingsLite>("get_settings")
       .then((s) => {
         setTheme(resolveTheme(s.theme));
@@ -93,6 +110,7 @@ export function OverlayAlert() {
     };
     window.addEventListener("keydown", onKey);
     return () => {
+      eventsCancelled = true;
       void unlistenPromise.then((u) => u());
       void unlistenUpdated.then((u) => u());
       clearInterval(clock);

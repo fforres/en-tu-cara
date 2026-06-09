@@ -370,33 +370,6 @@ fn position_under_tray(window: &tauri::WebviewWindow) {
     ns_window.setFrame_display(frame, false);
 }
 
-/// DIAGNOSTIC: ENTUCARA_SPIKE_TOGGLE=<n> drives the popover open→close n times via
-/// the same `toggle_popover` the tray click uses, on the main thread, logging each
-/// step — so the open/close crash/hang can be reproduced without physically
-/// clicking the menu-bar icon. Temporary; remove once the bug is found.
-#[cfg(target_os = "macos")]
-pub fn maybe_run_toggle_spike(app: &AppHandle) {
-    let Ok(spec) = std::env::var("ENTUCARA_SPIKE_TOGGLE") else {
-        return;
-    };
-    let n: usize = spec.parse().unwrap_or(10);
-    let app = app.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(3));
-        for i in 0..n {
-            log::info!("TOGGLE_SPIKE: cycle {i}/{n} → open");
-            let h = app.clone();
-            let _ = app.run_on_main_thread(move || toggle_popover(&h));
-            std::thread::sleep(std::time::Duration::from_millis(500));
-            log::info!("TOGGLE_SPIKE: cycle {i}/{n} → close");
-            let h = app.clone();
-            let _ = app.run_on_main_thread(move || toggle_popover(&h));
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        }
-        log::info!("TOGGLE_SPIKE: completed {n} cycles cleanly");
-    });
-}
-
 pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, "open_settings", "Open Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit En Tu Cara", true, None::<&str>)?;

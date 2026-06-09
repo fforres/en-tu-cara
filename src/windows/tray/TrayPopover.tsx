@@ -330,7 +330,10 @@ export function TrayPopover() {
         }),
         invoke<boolean>("get_paused").catch((e) => {
           console.warn("get_paused:", e);
-          return false;
+          // null, not false: a transient IPC blip must PRESERVE the last-good
+          // pause toggle, never silently flip it to "running" (same preserve
+          // discipline as the other three reads above).
+          return null;
         }),
         invoke<string[]>("get_ignored").catch((e) => {
           console.warn("get_ignored:", e);
@@ -343,7 +346,9 @@ export function TrayPopover() {
       if (cals) {
         setCalendars(new Map(cals.map((c) => [c.id, c])));
       }
-      setPaused(isPaused);
+      if (isPaused !== null) {
+        setPaused(isPaused);
+      }
       if (ign) {
         setIgnored(new Set(ign));
       }
@@ -662,13 +667,16 @@ export function TrayPopover() {
             role="menu"
             style={{
               position: "fixed",
-              left: Math.min(menu.x, window.innerWidth - 180),
+              // Math.max(8, …) floors the position: clamping ONLY the far edge
+              // let a tiny/short window (innerWidth<188, innerHeight<153) push
+              // the menu off the top-left corner with a negative offset.
+              left: Math.max(8, Math.min(menu.x, window.innerWidth - 180)),
               // Clamp against the menu's ACTUAL height. Always-present items:
               // "Open in local calendar" + "Ignore" (~72px). With a link it also
               // carries Open in browser + Copy link + a divider (+~73px). A flat
               // value let the link-bearing menu overflow off the bottom on a
               // near-bottom right-click. ~32px/item + 8px padding + 9px divider.
-              top: Math.min(menu.y, window.innerHeight - (menu.link ? 145 : 72)),
+              top: Math.max(8, Math.min(menu.y, window.innerHeight - (menu.link ? 145 : 72))),
               zIndex: 51,
               minWidth: 168,
               background: "Canvas",

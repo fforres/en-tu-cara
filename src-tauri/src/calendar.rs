@@ -328,7 +328,7 @@ fn authorized_to_read() -> bool {
 #[tauri::command]
 pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let t0 = std::time::Instant::now();
-    log::info!("list_calendars: enter");
+    log::debug!("list_calendars: enter");
     if !authorized_to_read() {
         log::warn!("list_calendars: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
@@ -336,7 +336,7 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     let mgr = EventsManager::new();
     let calendars = guard_eventkit("list_calendars", || mgr.list_calendars());
     match &calendars {
-        Ok(c) => log::info!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
+        Ok(c) => log::debug!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
         Err(e) => log::warn!("list_calendars: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
     Ok(calendars?.iter().map(calendar_dto).collect())
@@ -345,7 +345,7 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
     let t0 = std::time::Instant::now();
-    log::info!("fetch_events: enter back={days_back} fwd={days_forward}");
+    log::debug!("fetch_events: enter back={days_back} fwd={days_forward}");
     if !authorized_to_read() {
         log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
@@ -356,7 +356,7 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         mgr.fetch_events(now - Duration::days(days_back), now + Duration::days(days_forward), None)
     });
     match &events {
-        Ok(e) => log::info!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
+        Ok(e) => log::debug!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
         Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
     Ok(dedup_events(events?.iter().map(event_dto).collect()))

@@ -196,6 +196,42 @@ describe("TrayPopover", () => {
     expect(screen.getByText("Design sync")).toBeInTheDocument();
   });
 
+  it("preserves the pause toggle when a later get_paused fails (no silent un-pause)", async () => {
+    // Bug H1: get_paused resolved to `false` on a transient IPC blip and
+    // setPaused ran unconditionally — flipping the toggle to "running" even
+    // though the backend stayed paused. A failed read must PRESERVE last-good,
+    // like the other three reads in refresh().
+    let pausedCalls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "fetch_events":
+          return Promise.resolve([futureEvent()]);
+        case "list_calendars":
+          return Promise.resolve([
+            { id: "work", title: "Work", account: "me", color: [0.2, 0.4, 1, 1] },
+          ]);
+        case "get_paused":
+          pausedCalls += 1;
+          // First read: paused. Later reads: transient failure.
+          return pausedCalls === 1
+            ? Promise.resolve(true)
+            : Promise.reject(new Error("get_paused blip"));
+        case "get_ignored":
+          return Promise.resolve([] as string[]);
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    // First refresh paused → the toggle offers "Resume alerts" (its title).
+    expect(await screen.findByTitle("Resume alerts")).toBeInTheDocument();
+    // A later refresh whose get_paused REJECTS must keep the paused toggle.
+    fireEvent(window, new Event("focus"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByTitle("Resume alerts")).toBeInTheDocument();
+    expect(screen.queryByTitle("Pause alerts")).not.toBeInTheDocument();
+  });
+
   it("shows the calendar origin (account · calendar) instead of the raw link", async () => {
     render(<TrayPopover />);
     expect(await screen.findByText("me · Work")).toBeInTheDocument();
