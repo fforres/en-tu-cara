@@ -163,6 +163,24 @@ mod tests {
     }
 
     #[test]
+    fn has_meeting_link_detects_known_hosts_across_all_fields() {
+        // Drives the only_video_events alarm policy — a regression here silently
+        // changes which meetings fire. Covers each scanned field + a few hosts.
+        assert!(has_meeting_link(Some("https://us04web.zoom.us/j/123"), None, None));
+        assert!(has_meeting_link(None, Some("meet.google.com/abc-defg-hij"), None));
+        assert!(has_meeting_link(None, None, Some("Join: https://teams.microsoft.com/l/x")));
+        // Generic meet./call. subdomain heuristic.
+        assert!(has_meeting_link(Some("https://meet.example.com/room"), None, None));
+        // No conferencing link anywhere → false (a phone-only / in-person event).
+        assert!(!has_meeting_link(
+            Some("https://docs.google.com/document/d/1"),
+            Some("Room 4B"),
+            Some("agenda attached")
+        ));
+        assert!(!has_meeting_link(None, None, None));
+    }
+
+    #[test]
     fn guard_eventkit_contains_a_panic_as_err() {
         // The whole point: an EventKit NULL-panic must become an Err, never an
         // unwind into the scheduler tick or a Tauri command handler.
@@ -209,15 +227,31 @@ mod tests {
 /// per-account "Refresh Calendars" interval (Calendar.app ▸ Settings ▸ Accounts;
 /// minimum "Every minute" is NOT offered — 5 min is the floor, 15 the default).
 /// Documented in README + settings description.
-pub fn refresh_sources() {
+pub fn sync_event_store() {
     use objc2::rc::Retained;
     use objc2_event_kit::EKEventStore;
-    // EKEventStore is !Send — but this is only ever called from the scheduler
-    // thread, so a thread-local cached instance is both safe and cheap.
+    // EKEventStore is !Send. A thread_local gives each CALLING thread its own
+    // instance (the scheduler tick AND the main-thread fetch_events command) —
+    // never shared across threads, so the !Send invariant holds on both paths.
     thread_local! {
         static STORE: Retained<EKEventStore> = unsafe { EKEventStore::new() };
     }
-    STORE.with(|store| unsafe { store.refreshSourcesIfNecessary() });
+    STORE.with(|store| unsafe {
+        // Make a read a SYNC, not a stale pull (bug: an event deleted/edited in
+        // Google/Calendar.app while we're running kept re-appearing in the tray
+        // + alerts):
+        //   1. refreshSourcesIfNecessary asks remote accounts (CalDAV/Exchange/
+        //      Google) to push their latest down into the local store.
+        //   2. reset drops THIS process's cached EKEvent objects so the next
+        //      eventsMatchingPredicate re-reads the persistent store. Without it
+        //      a long-running agent keeps serving the snapshot it cached on
+        //      first access — Calendar.app looks correct (it resets on its own
+        //      EKEventStoreChanged notifications) while we lag indefinitely.
+        // We never write events (read-only agent), so reset discarding unsaved
+        // changes is a no-op for us.
+        store.refreshSourcesIfNecessary();
+        store.reset();
+    });
 }
 
 /// Cheap video-link presence check for the alarm policy (only_video_events).
@@ -268,25 +302,57 @@ pub fn request_calendar_access(app: tauri::AppHandle) -> Result<bool, String> {
         // here directly DEADLOCKS the UI (beach ball). Spawn it.
         _ => {
             log::info!("request_calendar_access: NotDetermined → prompting off-main");
-            std::thread::spawn(move || {
-                let mgr = EventsManager::new();
-                match mgr.request_access() {
-                    // EventKit caches the authorization status in the granting
-                    // PROCESS — so this process keeps reading "not authorized"
-                    // even after a grant until it's relaunched (verified: events
-                    // only appeared after a restart). Relaunch so the fresh
-                    // process picks up the grant and events show immediately.
-                    Ok(true) => {
-                        log::info!("request_calendar_access: granted → relaunching to apply");
-                        app.restart();
-                    }
-                    Ok(false) => log::info!("request_calendar_access: prompt denied"),
-                    Err(e) => log::warn!("request_calendar_access: prompt error: {e}"),
-                }
-            });
+            prompt_access_off_main(app);
             Ok(false)
         }
     }
+}
+
+/// Show the system calendar prompt OFF the main thread and, on grant, relaunch.
+///
+/// Off-main is mandatory: `request_access` blocks on an EventKit completion that
+/// needs the main run loop, so calling it on the main thread (Tauri IPC) beach-
+/// balls the UI. Relaunch-on-grant is also mandatory: EventKit caches the auth
+/// status in the GRANTING process, so this process keeps reading "not authorized"
+/// until a fresh one starts (verified: events only appeared after a restart).
+fn prompt_access_off_main(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mgr = EventsManager::new();
+        match mgr.request_access() {
+            Ok(true) => {
+                log::info!("calendar access granted → relaunching to apply");
+                app.restart();
+            }
+            Ok(false) => log::info!("calendar prompt denied"),
+            Err(e) => log::warn!("calendar prompt error: {e}"),
+        }
+    });
+}
+
+/// Startup pre-flight so a RETURNING user never has to hunt for the "Grant
+/// calendar access" button. The common trigger: a rebuild re-signs the app
+/// ad-hoc with a NEW code identity, so macOS/TCC treats it as a different app
+/// and resets the grant to NotDetermined — even though the bundle id is
+/// unchanged. (A stable Developer ID signature would make the grant survive
+/// rebuilds; until then this papers over it.)
+///
+/// NotDetermined → auto-prompt (the same off-main + relaunch-on-grant flow as
+/// the button). Denied is left ALONE: re-opening System Settings on every launch
+/// would nag; the in-tray button still routes there on demand. FullAccess is
+/// already good. The caller gates this on `onboarded` so a brand-new user is
+/// driven by onboarding (which requests access with context) instead.
+pub fn preflight_calendar_access(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        // Grace so the main run loop (which request_access's completion needs)
+        // is pumping before we prompt — mirrors the scheduler's startup grace.
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        let status = EventsManager::authorization_status();
+        log::info!("preflight calendar access: status={status:?}");
+        if matches!(status, AuthorizationStatus::NotDetermined) {
+            log::info!("preflight: NotDetermined → auto-prompting (no button needed)");
+            prompt_access_off_main(app);
+        }
+    });
 }
 
 /// Run an EventKit query that may PANIC rather than error. `eventkit-rs` /
@@ -350,6 +416,12 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
+    // Sync before reading so externally deleted/edited events don't linger: the
+    // tray popover invokes this command directly (it does NOT go through the
+    // scheduler tick that already calls sync_event_store), so without this the
+    // popover served whatever this process cached on first access. Cheap:
+    // refreshSourcesIfNecessary is a no-op when nothing changed, reset is local.
+    sync_event_store();
     let mgr = EventsManager::new();
     let now = Local::now();
     let events = guard_eventkit("fetch_events", || {

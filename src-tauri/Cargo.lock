@@ -1122,7 +1122,7 @@ checksum = "4ef6b89e5b37196644d8796de5268852ff179b44e96276cf4290264843743bb7"
 
 [[package]]
 name = "en-tu-cara"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "chrono",
  "eventkit-rs",

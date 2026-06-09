@@ -7,7 +7,7 @@ Accessory (dock-less) menu-bar agent. Modules in `src/`:
 - `scheduler.rs` — tick loop (≤30s, wall-clock armed), fire→overlay+sound,
   snooze/dismiss/pause commands, test-event injection.
 - `calendar.rs` — EventKit via `eventkit-rs`; multi-calendar dedup;
-  `refresh_sources()` per poll.
+  `sync_event_store()` (refresh remote + reset local cache) per poll.
 - `overlay.rs` / `tray.rs` — nspanel windows (takeover / popover / settings opener).
 - `settings.rs` / `state.rs` — persisted user settings / fired-set+snoozes (JSON in
   `~/Library/Application Support/dev.fforres.entucara/`).
@@ -46,8 +46,11 @@ REAL calendar event) · `ENTUCARA_OPEN_SETTINGS=<1|section>` · `ENTUCARA_SPIKE_
    fire); `.userInitiated` alone does NOT defeat App Nap. Measured: 0–1ms on AC.
 8. Occurrence identity = `(event_id @ occurrence_start)`; the same meeting
    appears once per subscribed calendar — `dedup_events` collapses by that key.
-9. EKEventStore is `!Send` — `refresh_sources` uses a thread_local store and
-   must stay on the scheduler thread.
+9. EKEventStore is `!Send` — `sync_event_store` uses a thread_local store, so it
+   is safe from BOTH the scheduler tick and the main-thread `fetch_events`
+   command (each thread gets its own instance; the store is never shared). It
+   does `refreshSourcesIfNecessary` + `reset` so a read SYNCS (picks up external
+   deletes/edits) instead of serving this process's first-access cache.
 
 ## Do NOT
 
