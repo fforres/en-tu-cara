@@ -64,14 +64,21 @@ jobs:
           # Updater signing — REQUIRED for self-update (set via `gh secret set`).
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-          # Apple code-signing + notarization is intentionally NOT wired yet.
-          # Passing empty APPLE_* secrets makes tauri-action attempt `security
-          # import` with nothing and FAIL the bundle — so they're omitted, which
-          # gives an ad-hoc-signed .dmg (Gatekeeper warns on first open). To
-          # enable notarization later, add these env vars back AND set the
-          # matching repo secrets (see docs/RELEASING.md):
-          #   APPLE_CERTIFICATE, APPLE_CERTIFICATE_PASSWORD, APPLE_SIGNING_IDENTITY,
-          #   APPLE_ID, APPLE_PASSWORD, APPLE_TEAM_ID
+          # Apple code-signing + notarization. tauri-action imports the .p12 into
+          # a temporary keychain (APPLE_CERTIFICATE + _PASSWORD), signs with the
+          # Developer ID identity (APPLE_SIGNING_IDENTITY, which OVERRIDES the
+          # `signingIdentity: "-"` ad-hoc default in tauri.conf — kept "-" so LOCAL
+          # builds stay frictionless), then notarizes + staples via notarytool
+          # (APPLE_ID + APPLE_PASSWORD app-specific pw + APPLE_TEAM_ID). Result: a
+          # double-click-installable .dmg, no Gatekeeper warning.
+          # ⚠️ All six secrets must exist before a release is cut — an empty
+          # APPLE_CERTIFICATE makes the `security import` step fail the build.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
           tagName: ${{ inputs.tag || github.ref_name }}
           releaseName: "En Tu Cara ${{ inputs.tag || github.ref_name }}"

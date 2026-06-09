@@ -87,29 +87,31 @@ Installed apps stay current on their own:
 The updater **mechanism** works whether or not the app is Apple-notarized. But
 Gatekeeper does not:
 
-- **Today (ad-hoc signed):** the `.dmg` download shows the "unidentified
-  developer / can't be opened" warning on first launch, and a self-update that
-  relaunches into an un-notarized bundle can hit the same wall. That's why
-  `runStartupUpdateCheck()` installs + relaunches automatically — flip it to
-  notify-only (`runStartupUpdateCheck(false)`) until notarization is set up if
-  the relaunch proves disruptive.
-- **Notarized (recommended once you have an Apple Developer account, $99/yr):**
-  no warnings, seamless self-update. The `APPLE_*` env vars are intentionally
-  **not** wired in `release.yml` right now — passing them empty makes
-  tauri-action fail the bundle at `security import`. To enable notarization,
-  uncomment/add the six `APPLE_*` lines back to the tauri-action `env:` block
-  **and** set the matching repo secrets:
+- **Ad-hoc signed (no secrets set):** the `.dmg` download shows the
+  "unidentified developer / can't be opened" warning on first launch, and a
+  self-update that relaunches into an un-notarized bundle can hit the same wall.
+  That's why `runStartupUpdateCheck()` installs + relaunches automatically — flip
+  it to notify-only (`runStartupUpdateCheck(false)`) if the relaunch proves
+  disruptive before notarization is live.
+- **Notarized (Developer ID, $99/yr Apple Developer Program):** no warnings,
+  seamless self-update, and the calendar TCC grant survives updates (stable code
+  identity). The six `APPLE_*` env vars ARE now wired into the tauri-action
+  `env:` block in `release.yml` — you only need to set the matching repo secrets.
+  `signingIdentity` stays `"-"` in tauri.conf (so LOCAL `pnpm tauri build` stays
+  ad-hoc + frictionless); `APPLE_SIGNING_IDENTITY` overrides it in CI.
 
-  | Secret                       | What                                           |
-  | ---------------------------- | ---------------------------------------------- |
-  | `APPLE_CERTIFICATE`          | base64 of your Developer ID `.p12`             |
-  | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password                            |
-  | `APPLE_SIGNING_IDENTITY`     | e.g. `Developer ID Application: Name (TEAMID)` |
-  | `APPLE_ID`                   | your Apple ID email                            |
-  | `APPLE_PASSWORD`             | an app-specific password                       |
-  | `APPLE_TEAM_ID`              | your 10-char team id                           |
+  | Secret                       | What                                                  |
+  | ---------------------------- | ----------------------------------------------------- |
+  | `APPLE_CERTIFICATE`          | base64 of your Developer ID `.p12`                    |
+  | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password                                   |
+  | `APPLE_SIGNING_IDENTITY`     | exact Keychain identity name, `Developer ID Application: <Name> (<TEAM_ID>)` — copy it verbatim from `security find-identity -v -p codesigning` |
+  | `APPLE_ID`                   | your Apple ID email                                   |
+  | `APPLE_PASSWORD`             | an app-specific password (appleid.apple.com)          |
+  | `APPLE_TEAM_ID`              | your 10-char Team ID (Apple Developer → Membership)   |
 
-  Set with `gh secret set APPLE_CERTIFICATE < cert.b64`, etc.
+  Set with `gh secret set APPLE_CERTIFICATE < cert.b64`, etc. ⚠️ All six must
+  exist before the next release is cut — an empty `APPLE_CERTIFICATE` fails the
+  build at `security import`.
 
 ## Keys & secrets
 
