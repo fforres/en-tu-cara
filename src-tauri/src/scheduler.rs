@@ -352,29 +352,21 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     }
 
     // Menu-bar next-event title (user req): "Title… · 12m". Cleared when disabled
-    // or nothing upcoming in the fetch window.
+    // or nothing upcoming. Derived by the SAME tray::next_event_title the popover
+    // refresh uses — one computation, so the menu-bar text and the popover list
+    // can't drift. This is the background (popover-closed) trigger; opening the
+    // popover refreshes it immediately via refresh_popover.
     let title = if settings.show_next_event_in_menu_bar {
-        events
+        let candidates: Vec<crate::tray::MenuBarCandidate> = events
             .iter()
-            .filter(|e| !e.all_day && e.status != "canceled" && e.start > now)
-            .min_by_key(|e| e.start)
-            .map(|e| {
-                let mins = (e.start - now).num_minutes();
-                let when = if mins >= 60 {
-                    format!("{}h{:02}m", mins / 60, mins % 60)
-                } else {
-                    format!("{}m", mins.max(1))
-                };
-                let max = settings.menu_bar_title_chars.max(4) as usize;
-                let t: String = if e.title.chars().count() > max {
-                    let mut s: String = e.title.chars().take(max - 1).collect();
-                    s.push('…');
-                    s
-                } else {
-                    e.title.clone()
-                };
-                format!("{t} · {when}")
+            .map(|e| crate::tray::MenuBarCandidate {
+                title: &e.title,
+                start: e.start,
+                all_day: e.all_day,
+                status: &e.status,
             })
+            .collect();
+        crate::tray::next_event_title(&candidates, now, settings.menu_bar_title_chars as usize)
     } else {
         None
     };

@@ -309,19 +309,24 @@ export function TrayPopover() {
     refreshingRef.current = true;
     try {
       // Each read degrades on its own — never surface a backend failure in the
-      // popover UI. Most commonly fetch_events fails because the process has no
-      // calendar access (a bare dev binary), which should just look like "no
+      // popover UI. Most commonly the events read fails because the process has
+      // no calendar access (a bare dev binary), which should just look like "no
       // events", not an error banner.
       //
+      // `refresh_popover` is the events read: it fetches the upcoming list AND
+      // refreshes the menu-bar "next event" title from that SAME list, so the
+      // menu-bar text never lags behind what we show here (it's the single
+      // next-event derivation, shared with the background scheduler heartbeat).
+      //
       // PRESERVE-ON-FAILURE (regression fix): a transient EventKit blip makes
-      // `fetch_events` reject. Resolving that to `[]` and calling setEvents([])
-      // CLEARS the visible list — events "disappear and can't be clicked", and
-      // stay gone if later polls also blip. So a read that fails resolves to
-      // `null` and we SKIP the corresponding setState, keeping the last-good
-      // data on screen. Only a SUCCESSFUL read replaces state.
+      // the read reject. Resolving that to `[]` and calling setEvents([]) CLEARS
+      // the visible list — events "disappear and can't be clicked", and stay
+      // gone if later polls also blip. So a read that fails resolves to `null`
+      // and we SKIP the corresponding setState, keeping the last-good data on
+      // screen. Only a SUCCESSFUL read replaces state.
       const [evs, cals, isPaused, ign] = await Promise.all([
-        invoke<UiEvent[]>("fetch_events", { daysBack: 1, daysForward: 7 }).catch((e) => {
-          console.warn("fetch_events:", e);
+        invoke<UiEvent[]>("refresh_popover", { daysBack: 1, daysForward: 7 }).catch((e) => {
+          console.warn("refresh_popover:", e);
           return null;
         }),
         invoke<CalendarInfo[]>("list_calendars").catch((e) => {

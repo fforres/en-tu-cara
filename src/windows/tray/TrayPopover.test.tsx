@@ -42,7 +42,7 @@ beforeEach(() => {
   openUrlMock.mockResolvedValue(undefined);
   invokeMock.mockImplementation((cmd: string, args?: { occurrenceKey?: string }) => {
     switch (cmd) {
-      case "fetch_events":
+      case "refresh_popover":
         return Promise.resolve([futureEvent()]);
       case "list_calendars":
         return Promise.resolve([
@@ -104,7 +104,7 @@ describe("TrayPopover", () => {
     // alarm would still fire. The optimistic flip must revert on rejection.
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
-        case "fetch_events":
+        case "refresh_popover":
           return Promise.resolve([futureEvent()]);
         case "list_calendars":
           return Promise.resolve([
@@ -164,13 +164,13 @@ describe("TrayPopover", () => {
     );
   });
 
-  it("keeps the previously-shown events when a later fetch_events fails (no clobber)", async () => {
+  it("keeps the previously-shown events when a later refresh_popover fails (no clobber)", async () => {
     // Regression: a transient EventKit blip must NOT clear the visible list.
     // First refresh succeeds; a later one rejects → the event must stay.
     let calls = 0;
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
-        case "fetch_events":
+        case "refresh_popover":
           calls += 1;
           return calls === 1
             ? Promise.resolve([futureEvent()])
@@ -204,7 +204,7 @@ describe("TrayPopover", () => {
     let pausedCalls = 0;
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
-        case "fetch_events":
+        case "refresh_popover":
           return Promise.resolve([futureEvent()]);
         case "list_calendars":
           return Promise.resolve([
@@ -240,12 +240,12 @@ describe("TrayPopover", () => {
   });
 
   it("keeps the calendar origin when a later list_calendars fails (no clobber)", async () => {
-    // Same preserve-on-failure discipline as fetch_events: a transient blip in
+    // Same preserve-on-failure discipline as refresh_popover: a transient blip in
     // list_calendars must not blank out the "account · calendar" origin line.
     let calls = 0;
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
-        case "fetch_events":
+        case "refresh_popover":
           return Promise.resolve([futureEvent()]);
         case "list_calendars":
           calls += 1;
@@ -275,7 +275,7 @@ describe("TrayPopover", () => {
     let calls = 0;
     invokeMock.mockImplementation((cmd: string) => {
       switch (cmd) {
-        case "fetch_events":
+        case "refresh_popover":
           return Promise.resolve([futureEvent()]);
         case "list_calendars":
           return Promise.resolve([
