@@ -227,8 +227,9 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
             return env_events;
         }
     }
-    // Nudge the OS sync daemon, then read (freshness; ≤1 min cadence).
-    crate::calendar::refresh_sources();
+    // Sync the event store (pull remote changes + drop the stale local cache),
+    // then read — so external deletes/edits are reflected (freshness; ≤1 min cadence).
+    crate::calendar::sync_event_store();
     // EventKit fetch: 1 day back (ongoing events started earlier) + 2 forward.
     // The forward window is 2 days, not 1, so a DST "spring forward" day (a 23h
     // wall-clock day) can never clip the next 24h of events out of the query.

@@ -227,7 +227,7 @@ mod tests {
 /// per-account "Refresh Calendars" interval (Calendar.app ▸ Settings ▸ Accounts;
 /// minimum "Every minute" is NOT offered — 5 min is the floor, 15 the default).
 /// Documented in README + settings description.
-pub fn refresh_sources() {
+pub fn sync_event_store() {
     use objc2::rc::Retained;
     use objc2_event_kit::EKEventStore;
     // EKEventStore is !Send. A thread_local gives each CALLING thread its own
@@ -418,10 +418,10 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
     }
     // Sync before reading so externally deleted/edited events don't linger: the
     // tray popover invokes this command directly (it does NOT go through the
-    // scheduler tick that already calls refresh_sources), so without this the
+    // scheduler tick that already calls sync_event_store), so without this the
     // popover served whatever this process cached on first access. Cheap:
     // refreshSourcesIfNecessary is a no-op when nothing changed, reset is local.
-    refresh_sources();
+    sync_event_store();
     let mgr = EventsManager::new();
     let now = Local::now();
     let events = guard_eventkit("fetch_events", || {
