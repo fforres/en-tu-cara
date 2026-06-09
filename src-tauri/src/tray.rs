@@ -81,6 +81,15 @@ pub fn open_settings(app: AppHandle) -> Result<(), String> {
     open_settings_at(app, None)
 }
 
+/// Tray "Comments" button: open the settings window focused on the Feedback
+/// section. Reuses the settings window (a normal, text-input-capable window that
+/// already handles the Accessory↔Regular activation dance) rather than spinning
+/// up a separate feedback window.
+#[tauri::command]
+pub fn open_feedback(app: AppHandle) -> Result<(), String> {
+    open_settings_at(app, Some("feedback"))
+}
+
 pub fn open_settings_at(app: AppHandle, section: Option<&str>) -> Result<(), String> {
     if let Some(existing) = app.get_webview_window(SETTINGS_LABEL) {
         let _ = existing.show();

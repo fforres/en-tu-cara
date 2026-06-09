@@ -538,6 +538,13 @@ export function TrayPopover() {
         <strong style={{ fontSize: 13 }}>En Tu Cara</strong>
         <span style={{ display: "flex", gap: 10 }}>
           <button
+            title="Send feedback or a suggestion"
+            onClick={() => void invoke("open_feedback")}
+            style={{ border: "none", background: "none", cursor: "pointer", fontSize: 14 }}
+          >
+            💬
+          </button>
+          <button
             title={paused ? "Resume alerts" : "Pause alerts"}
             onClick={async () => {
               const next = !paused;
