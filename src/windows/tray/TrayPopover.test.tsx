@@ -238,4 +238,64 @@ describe("TrayPopover", () => {
     // The raw URL is no longer shown as a text line.
     expect(screen.queryByText(ZOOM)).not.toBeInTheDocument();
   });
+
+  it("keeps the calendar origin when a later list_calendars fails (no clobber)", async () => {
+    // Same preserve-on-failure discipline as fetch_events: a transient blip in
+    // list_calendars must not blank out the "account · calendar" origin line.
+    let calls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "fetch_events":
+          return Promise.resolve([futureEvent()]);
+        case "list_calendars":
+          calls += 1;
+          return calls === 1
+            ? Promise.resolve([
+                { id: "work", title: "Work", account: "me", color: [0.2, 0.4, 1, 1] },
+              ])
+            : Promise.reject(new Error("list_calendars blip"));
+        case "get_paused":
+          return Promise.resolve(false);
+        case "get_ignored":
+          return Promise.resolve([] as string[]);
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    expect(await screen.findByText("me · Work")).toBeInTheDocument();
+    fireEvent(window, new Event("focus"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("me · Work")).toBeInTheDocument();
+  });
+
+  it("keeps the IGNORED badge when a later get_ignored fails (no clobber)", async () => {
+    // A transient get_ignored failure must preserve the last-good ignore set,
+    // never silently un-dim an ignored event (which would let it alert again).
+    let calls = 0;
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "fetch_events":
+          return Promise.resolve([futureEvent()]);
+        case "list_calendars":
+          return Promise.resolve([
+            { id: "work", title: "Work", account: "me", color: [0.2, 0.4, 1, 1] },
+          ]);
+        case "get_paused":
+          return Promise.resolve(false);
+        case "get_ignored":
+          calls += 1;
+          return calls === 1
+            ? Promise.resolve(["(evt @ t1)"])
+            : Promise.reject(new Error("get_ignored blip"));
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    expect(await screen.findByText("IGNORED")).toBeInTheDocument();
+    fireEvent(window, new Event("focus"));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("IGNORED")).toBeInTheDocument();
+  });
 });

@@ -103,6 +103,26 @@ pub static INJECTED_EVENTS: Mutex<Option<Vec<AlarmEvent>>> = Mutex::new(None);
 /// the fire emit, so it pulls these on mount (and also listens for later emits).
 pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 
+/// Last-seen "did the calendar pipeline yield ANY events" state, for the
+/// transition log below. None = no tick has run yet.
+static LAST_EVENT_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Decide whether a per-tick event count warrants an INFO line. We log only on
+/// the EDGE (had events → 0, or 0 → had events), never every tick: the steady
+/// state is silent, but "my calendar went empty" / "events came back" — the
+/// exact symptom from the access saga — always leaves a mark. Pure for testing.
+fn presence_transition(prev: Option<bool>, count: usize) -> Option<String> {
+    let now_has = count > 0;
+    if prev == Some(now_has) {
+        return None;
+    }
+    Some(if now_has {
+        format!("calendar pipeline now yields {count} event(s)")
+    } else {
+        "calendar pipeline yields 0 events (was non-empty) — tray/alerts will be empty".to_string()
+    })
+}
+
 /// Lock a mutex, recovering the guard even if a prior holder panicked. The alarm
 /// path must degrade to "keep going" on a poisoned lock, never "panic forever":
 /// a poisoned scheduler mutex would otherwise make every subsequent `.lock()`
@@ -251,6 +271,14 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         only_video_events: settings.only_video_events,
     };
     let events = upcoming_alarm_events(&settings);
+    {
+        // Edge-triggered "calendar went empty / came back" signal (INFO).
+        let mut last = lock_resilient(&LAST_EVENT_PRESENCE);
+        if let Some(msg) = presence_transition(*last, events.len()) {
+            log::info!("{msg}");
+        }
+        *last = Some(!events.is_empty());
+    }
     let state = app.state::<SharedState>();
 
     let actions = {
@@ -607,6 +635,21 @@ pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presence_transition_only_logs_on_the_edge() {
+        // First observation always speaks (None → known).
+        assert!(presence_transition(None, 5).is_some());
+        assert!(presence_transition(None, 0).is_some());
+        // Steady state is silent — no per-tick spam.
+        assert!(presence_transition(Some(true), 5).is_none());
+        assert!(presence_transition(Some(false), 0).is_none());
+        // The two edges that matter both speak.
+        let went_empty = presence_transition(Some(true), 0).expect("empty edge logs");
+        assert!(went_empty.contains("0 events"), "got: {went_empty}");
+        let came_back = presence_transition(Some(false), 3).expect("non-empty edge logs");
+        assert!(came_back.contains('3'), "got: {came_back}");
+    }
 
     #[test]
     fn lock_resilient_recovers_from_poison() {

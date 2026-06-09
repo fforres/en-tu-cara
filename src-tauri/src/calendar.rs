@@ -163,6 +163,24 @@ mod tests {
     }
 
     #[test]
+    fn has_meeting_link_detects_known_hosts_across_all_fields() {
+        // Drives the only_video_events alarm policy — a regression here silently
+        // changes which meetings fire. Covers each scanned field + a few hosts.
+        assert!(has_meeting_link(Some("https://us04web.zoom.us/j/123"), None, None));
+        assert!(has_meeting_link(None, Some("meet.google.com/abc-defg-hij"), None));
+        assert!(has_meeting_link(None, None, Some("Join: https://teams.microsoft.com/l/x")));
+        // Generic meet./call. subdomain heuristic.
+        assert!(has_meeting_link(Some("https://meet.example.com/room"), None, None));
+        // No conferencing link anywhere → false (a phone-only / in-person event).
+        assert!(!has_meeting_link(
+            Some("https://docs.google.com/document/d/1"),
+            Some("Room 4B"),
+            Some("agenda attached")
+        ));
+        assert!(!has_meeting_link(None, None, None));
+    }
+
+    #[test]
     fn guard_eventkit_contains_a_panic_as_err() {
         // The whole point: an EventKit NULL-panic must become an Err, never an
         // unwind into the scheduler tick or a Tauri command handler.
