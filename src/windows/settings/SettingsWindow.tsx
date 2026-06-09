@@ -17,6 +17,7 @@ import { searchSettings } from "./fuzzy";
 import { THEMES } from "../overlay/themes";
 import { checkForUpdate, installAndRelaunch } from "../../lib/updater";
 import type { Update } from "@tauri-apps/plugin-updater";
+import { capture, initTelemetry, setTelemetryEnabled } from "../../telemetry";
 
 interface CalendarInfo {
   id: string;
@@ -441,6 +442,9 @@ export function SettingsWindow() {
       .then(setSounds)
       .catch(() => {});
     refreshCalendars();
+    // Telemetry may not have finished init when this window mounts; ensure it,
+    // then record the open (no-op if telemetry is disabled).
+    void initTelemetry().then(() => capture("settings_opened"));
   }, [refreshCalendars]);
 
   const update = useCallback((patch: Partial<Settings>) => {
@@ -451,6 +455,13 @@ export function SettingsWindow() {
     const next = { ...prev, ...patch };
     settingsRef.current = next; // keep current for back-to-back updates
     setSettings(next);
+    // Live-apply the telemetry toggle (opt in/out) the moment it changes.
+    if (
+      patch.telemetry_enabled !== undefined &&
+      patch.telemetry_enabled !== prev.telemetry_enabled
+    ) {
+      void setTelemetryEnabled(patch.telemetry_enabled);
+    }
     // Persist OUTSIDE the state updater (live-apply is the contract — no save
     // button). Clear any stale error banner once a write succeeds.
     invoke("set_settings", { settings: next })

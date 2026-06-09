@@ -45,6 +45,15 @@ pub struct Settings {
     /// Whether the first-run onboarding window has been completed. Drives whether
     /// we show onboarding on launch (see tray::maybe_show_onboarding).
     pub onboarded: bool,
+    /// Anonymized usage telemetry → PostHog (see telemetry.rs). Default ON, with a
+    /// Settings toggle and the `ENTUCARA_TELEMETRY=off` env kill-switch. Only
+    /// behavioral data + hashes ever leave the device — never event titles,
+    /// attendees, calendar names, or raw emails.
+    pub telemetry_enabled: bool,
+    /// Stable, random per-install id used as the telemetry `distinct_id` so JS and
+    /// Rust events unify on one device. Generated once on first load (see
+    /// `SettingsStore::load`); not a hardware id. Empty string = "not yet minted".
+    pub device_id: String,
 }
 
 impl Settings {
@@ -86,6 +95,8 @@ impl Default for Settings {
             theme: "frost-dark".into(),
             tray_icon: "auto".into(),
             onboarded: false,
+            telemetry_enabled: true,
+            device_id: String::new(),
         }
     }
 }
@@ -99,7 +110,14 @@ impl SettingsStore {
     pub fn load(dir: PathBuf) -> Self {
         let path = dir.join("settings.json");
         let current = crate::paths::load_json_or_default(&path);
-        Self { current: Mutex::new(current), path }
+        let store = Self { current: Mutex::new(current), path };
+        // Mint the stable telemetry device id once, on first load, and persist it.
+        // Done here (not in Default) so it survives across launches via the same
+        // atomic-write path as every other setting.
+        if store.get().device_id.is_empty() {
+            store.update(|s| s.device_id = uuid::Uuid::new_v4().to_string());
+        }
+        store
     }
 
     pub fn get(&self) -> Settings {
@@ -287,12 +305,35 @@ mod tests {
     }
 
     #[test]
+    fn device_id_is_minted_once_and_stable_across_reloads() {
+        let dir = std::env::temp_dir().join(format!("entucara-devid-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = SettingsStore::load(dir.clone());
+        let id = first.get().device_id;
+        assert!(!id.is_empty(), "a device id is minted on first load");
+        assert_eq!(id.len(), 36, "looks like a UUID v4 (8-4-4-4-12)");
+        // Reload from disk: the same id must come back, not a fresh one.
+        let second = SettingsStore::load(dir.clone());
+        assert_eq!(second.get().device_id, id, "device id is persisted, not regenerated");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn telemetry_defaults_on() {
+        assert!(Settings::default().telemetry_enabled, "telemetry ships on by default");
+    }
+
+    #[test]
     fn corrupt_file_falls_back_to_defaults() {
         let dir = std::env::temp_dir().join(format!("entucara-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("settings.json"), b"{not json").unwrap();
         let store = SettingsStore::load(dir.clone());
-        assert_eq!(store.get(), Settings::default());
+        // Everything falls back to defaults — except device_id, which load()
+        // mints fresh when absent (an empty/corrupt file has none).
+        let got = store.get();
+        assert!(!got.device_id.is_empty(), "a device id is minted even from a corrupt file");
+        assert_eq!(Settings { device_id: String::new(), ..got }, Settings::default());
         let _ = std::fs::remove_dir_all(dir);
     }
 }

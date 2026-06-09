@@ -13,6 +13,7 @@ mod settings;
 #[cfg(target_os = "macos")]
 mod sound;
 mod state;
+mod telemetry;
 mod testmode;
 mod tray;
 
@@ -75,6 +76,15 @@ pub fn run() {
             .copied()
             .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
         if !is_swallowable_eventkit_null(payload) {
+            // Surface genuine panics in telemetry (no-op until init / if disabled).
+            // try_send is non-blocking, so this is safe even from a panicking thread.
+            crate::telemetry::record(
+                "rust_panic",
+                serde_json::json!({
+                    "message": payload.unwrap_or("non-string panic payload"),
+                    "location": info.location().map(|l| format!("{}:{}", l.file(), l.line())),
+                }),
+            );
             default_hook(info);
         }
     }));
@@ -139,6 +149,7 @@ pub fn run() {
             settings::set_settings,
             settings::preview_sound,
             settings::list_system_sounds,
+            telemetry::telemetry_config,
         ])
         .setup(|app| {
             log::info!(
@@ -221,9 +232,20 @@ pub fn run() {
             // tray was built with the template default in tray::setup above).
             tray::apply_tray_icon(app.handle(), &settings_store.get().tray_icon);
             let onboarded = settings_store.get().onboarded;
+
+            // Anonymized telemetry (PostHog) — opt-out, off in test mode unless
+            // ENTUCARA_TELEMETRY=on. Started BEFORE the scheduler so the first
+            // ticks' events are captured. The worker runs on its own thread behind
+            // a drop-on-full queue and can never stall an alarm (see telemetry.rs).
+            telemetry::start(app.handle(), &settings_store.get());
+
             app.manage(settings_store);
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
+            // Independent 10s loop that keeps the menu-bar "next event" title and
+            // countdown current between calendar polls (and clears a finished one).
+            #[cfg(target_os = "macos")]
+            scheduler::spawn_menu_bar_loop(app.handle());
 
             // Startup pre-flight: auto-prompt for calendar access if a returning
             // (already-onboarded) user's grant was lost — e.g. a rebuild re-signs

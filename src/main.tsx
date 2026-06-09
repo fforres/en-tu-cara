@@ -4,6 +4,11 @@ import App from "./App";
 import "./global.css";
 import { invoke } from "@tauri-apps/api/core";
 import { notifyIfUpdated, runStartupUpdateCheck } from "./lib/updater";
+import { initTelemetry } from "./telemetry";
+
+// Anonymized telemetry (PostHog). Runs per webview load; Rust decides whether it's
+// enabled and supplies the shared device distinct_id. No-ops when disabled.
+void initTelemetry();
 
 // Startup chores run from the always-loaded `popover` window only (so they
 // happen once, not per overlay/settings webview). See src/lib/updater.ts +

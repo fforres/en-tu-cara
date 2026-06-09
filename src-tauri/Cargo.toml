@@ -1,6 +1,6 @@
 [package]
 name = "en-tu-cara"
-version = "0.4.4"
+version = "0.5.0"
 description = "Unmissable meeting alerts for macOS. Fully local."
 authors = ["fforres"]
 edition = "2021"
@@ -22,6 +22,14 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
+# Telemetry → PostHog (anonymized, opt-out): a tiny JSON POST to the capture API
+# on a dedicated thread behind a drop-on-full queue (see telemetry.rs). ureq is a
+# blocking, pure-Rust-TLS client — no tokio/reqwest weight, no OpenSSL system dep.
+ureq = { version = "3", features = ["json"] }
+# Stable per-install device id (telemetry distinct_id) + sha256 of the calendar
+# account for coarse, non-reversible org grouping.
+uuid = { version = "1", features = ["v4"] }
+sha2 = "0.10"
 
 # Overlay: native NSPanel (screenSaver level + collectionBehavior). Pinned to exact
 # rev on the v2.1 branch — branch is not default; unpinned = non-reproducible.

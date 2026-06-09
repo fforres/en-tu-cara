@@ -195,6 +195,22 @@ mod tests {
     }
 
     #[test]
+    fn calendar_enabled_governs_what_the_user_sees() {
+        // None enabled-set = every calendar shows (the default).
+        assert!(calendar_enabled(&None, Some("work")));
+        assert!(calendar_enabled(&None, None));
+        // An explicit set includes only listed calendars…
+        let enabled = Some(vec!["work".to_string(), "personal".to_string()]);
+        assert!(calendar_enabled(&enabled, Some("work")));
+        assert!(
+            !calendar_enabled(&enabled, Some("buffer")),
+            "a disabled calendar's events must be filtered out (the popover bug)"
+        );
+        // …but an event with no calendar id is never silently dropped.
+        assert!(calendar_enabled(&enabled, None));
+    }
+
+    #[test]
     fn dedup_prefers_row_with_my_rsvp() {
         // CP1a real-data case: same meeting via a colleague's subscribed calendar
         // (no rsvp) and via the user's own calendar (rsvp present).
@@ -226,8 +242,10 @@ mod tests {
 /// sync daemon, but the actual server-fetch cadence for CalDAV accounts is the
 /// per-account "Refresh Calendars" interval (Calendar.app ▸ Settings ▸ Accounts;
 /// minimum "Every minute" is NOT offered — 5 min is the floor, 15 the default).
-/// Documented in README + settings description.
-pub fn sync_event_store() {
+/// Documented in README + settings description. Private: every read now goes
+/// through `fetch_events` (the single sync point), so nothing outside this
+/// module needs to sync separately.
+fn sync_event_store() {
     use objc2::rc::Retained;
     use objc2_event_kit::EKEventStore;
     // EKEventStore is !Send. A thread_local gives each CALLING thread its own
@@ -408,6 +426,20 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     Ok(calendars?.iter().map(calendar_dto).collect())
 }
 
+/// Best-effort, non-reversible identifier for the user's calendar "org": the
+/// sha256 of the first calendar account that looks like an email (its `source`,
+/// e.g. "felipe@skyward.ai"). Used ONLY as a coarse telemetry grouping key — we
+/// never send the raw email. Returns None when access isn't granted yet or no
+/// account carries an email (self-heals on a later launch once access exists).
+pub fn primary_account_hash() -> Option<String> {
+    let calendars = list_calendars().ok()?;
+    let email = calendars
+        .into_iter()
+        .filter_map(|c| c.account)
+        .find(|a| a.contains('@'))?;
+    Some(crate::telemetry::sha256_hex(email.trim().to_ascii_lowercase().as_bytes()))
+}
+
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
     let t0 = std::time::Instant::now();
@@ -416,11 +448,11 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
-    // Sync before reading so externally deleted/edited events don't linger: the
-    // tray popover invokes this command directly (it does NOT go through the
-    // scheduler tick that already calls sync_event_store), so without this the
-    // popover served whatever this process cached on first access. Cheap:
-    // refreshSourcesIfNecessary is a no-op when nothing changed, reset is local.
+    // Sync before reading so externally deleted/edited events don't linger.
+    // EVERY event read (popover and scheduler) goes through here via
+    // `active_events`, so this is the one sync point — callers must not sync
+    // again. Cheap: refreshSourcesIfNecessary is a no-op when nothing changed,
+    // reset is local.
     sync_event_store();
     let mgr = EventsManager::new();
     let now = Local::now();
@@ -432,6 +464,34 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
     Ok(dedup_events(events?.iter().map(event_dto).collect()))
+}
+
+/// Is an event's calendar enabled for alerts/listing? `None` enabled-set means
+/// "all calendars"; an event with no calendar id is never silently dropped. Pure
+/// so the one rule that decides what the user sees is unit-tested.
+pub fn calendar_enabled(enabled: &Option<Vec<String>>, calendar_id: Option<&str>) -> bool {
+    match (enabled, calendar_id) {
+        (Some(enabled), Some(cal)) => enabled.iter().any(|c| c == cal),
+        (Some(_), None) => true,
+        (None, _) => true,
+    }
+}
+
+/// THE canonical event read for the whole app: `fetch_events` (sync + dedup) then
+/// drop anything from a calendar the user disabled. The tray popover, the
+/// menu-bar title, and the alarm scheduler all read through here — so the list
+/// you see, the "next event" countdown, and what can fire an alert can never
+/// disagree about which events exist. Disabling a calendar takes effect the next
+/// time any of them reads (e.g. reopening the tray).
+pub fn active_events(
+    enabled_calendar_ids: &Option<Vec<String>>,
+    days_back: i64,
+    days_forward: i64,
+) -> Result<Vec<EventDto>, String> {
+    Ok(fetch_events(days_back, days_forward)?
+        .into_iter()
+        .filter(|e| calendar_enabled(enabled_calendar_ids, e.calendar_id.as_deref()))
+        .collect())
 }
 
 /// Real-pipeline e2e (user-authorized fast test): create a REAL EventKit event
