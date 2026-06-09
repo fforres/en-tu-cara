@@ -139,6 +139,7 @@ pub fn run() {
             scheduler::unignore_occurrence,
             scheduler::get_ignored,
             tray::open_settings,
+            tray::open_feedback,
             tray::maybe_show_onboarding,
             tray::finish_onboarding,
             tray::open_url,
@@ -150,6 +151,7 @@ pub fn run() {
             settings::preview_sound,
             settings::list_system_sounds,
             telemetry::telemetry_config,
+            telemetry::submit_feedback,
         ])
         .setup(|app| {
             log::info!(

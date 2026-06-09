@@ -193,11 +193,7 @@ pub fn log_event(level: &str, target: &str, message: impl Into<String>) {
 /// The worker: owns the only network code. Batches events and flushes on size or
 /// time. All failures are swallowed (telemetry must never crash the app).
 fn worker(rx: Receiver<Value>, envelope: Map<String, Value>) {
-    let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(HTTP_TIMEOUT))
-        .build()
-        .into();
-    let url = format!("{POSTHOG_HOST}/batch/");
+    let agent = build_agent();
     let mut batch: Vec<Value> = Vec::new();
 
     loop {
@@ -206,16 +202,16 @@ fn worker(rx: Receiver<Value>, envelope: Map<String, Value>) {
                 enrich(&mut entry, &envelope);
                 batch.push(entry);
                 if batch.len() >= BATCH_MAX {
-                    flush(&agent, &url, &mut batch);
+                    flush(&agent, &mut batch);
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
                 if !batch.is_empty() {
-                    flush(&agent, &url, &mut batch);
+                    flush(&agent, &mut batch);
                 }
             }
             Err(RecvTimeoutError::Disconnected) => {
-                flush(&agent, &url, &mut batch);
+                flush(&agent, &mut batch);
                 return;
             }
         }
@@ -238,16 +234,65 @@ fn enrich(entry: &mut Value, envelope: &Map<String, Value>) {
     }
 }
 
-fn flush(agent: &ureq::Agent, url: &str, batch: &mut Vec<Value>) {
+fn flush(agent: &ureq::Agent, batch: &mut Vec<Value>) {
     if batch.is_empty() {
         return;
     }
     let count = batch.len();
-    let body = json!({ "api_key": POSTHOG_KEY, "batch": std::mem::take(batch) });
-    match agent.post(url).header("content-type", "application/json").send_json(&body) {
-        Ok(resp) => log::debug!("telemetry flushed {count} event(s) (HTTP {})", resp.status()),
+    match post_batch(agent, std::mem::take(batch)) {
+        Ok(code) => log::debug!("telemetry flushed {count} event(s) (HTTP {code})"),
         Err(e) => log::debug!("telemetry flush failed (dropped {count}, will not retry): {e}"),
     }
+}
+
+/// Build the blocking HTTP client used for every PostHog POST (pure-Rust TLS, a
+/// hard global timeout so a hung socket can't pin the caller).
+fn build_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(HTTP_TIMEOUT))
+        .build()
+        .into()
+}
+
+/// POST a batch of already-shaped events to the PostHog capture endpoint. The one
+/// network call, shared by the worker flush and one-shot sends. Returns the HTTP
+/// status on success.
+fn post_batch(agent: &ureq::Agent, events: Vec<Value>) -> Result<u16, String> {
+    let body = json!({ "api_key": POSTHOG_KEY, "batch": events });
+    agent
+        .post(format!("{POSTHOG_HOST}/batch/"))
+        .header("content-type", "application/json")
+        .send_json(&body)
+        .map(|resp| resp.status().as_u16())
+        .map_err(|e| e.to_string())
+}
+
+/// Send a user-submitted suggestion. Unlike passive telemetry this is an explicit,
+/// opt-in action — the user typed it and pressed send — so it goes out REGARDLESS
+/// of the telemetry toggle, on its own one-shot thread (the IPC caller never
+/// blocks; delivery is best-effort). The message is the payload the user chose to
+/// share; `email` is optional and omitted when blank.
+pub fn send_feedback(distinct_id: String, message: String, email: Option<String>, app_version: String) {
+    std::thread::spawn(move || {
+        let mut props = Map::new();
+        props.insert("distinct_id".into(), json!(distinct_id));
+        props.insert("$process_person_profiles".into(), json!(false));
+        props.insert("message".into(), json!(message));
+        props.insert("app_version".into(), json!(app_version));
+        props.insert("os".into(), json!(os_version()));
+        if let Some(email) = email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty()) {
+            props.insert("email".into(), json!(email));
+        }
+        let event = json!({
+            "event": "feedback_submitted",
+            "properties": Value::Object(props),
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        match post_batch(&build_agent(), vec![event]) {
+            Ok(code) => log::debug!("feedback sent (HTTP {code})"),
+            Err(e) => log::warn!("feedback send failed: {e}"),
+        }
+    });
 }
 
 /// Tauri command: the frontend reads this once on load to decide whether to init
@@ -267,9 +312,50 @@ pub fn telemetry_config(app: tauri::AppHandle) -> Value {
     })
 }
 
+/// Trim + bound a submitted suggestion; `None` when there's nothing to send.
+/// Pure so the validation boundary is unit-tested.
+fn sanitize_feedback(message: &str, email: Option<&str>) -> Option<(String, Option<String>)> {
+    let message: String = message.trim().chars().take(5000).collect();
+    if message.is_empty() {
+        return None;
+    }
+    let email = email
+        .map(str::trim)
+        .filter(|e| !e.is_empty())
+        .map(|e| e.chars().take(200).collect());
+    Some((message, email))
+}
+
+/// Tauri command behind the tray "Comments" button. Sends a `feedback_submitted`
+/// event via the explicit, always-on path (see `send_feedback`) — works even when
+/// passive telemetry is off.
+#[tauri::command]
+pub fn submit_feedback(app: tauri::AppHandle, message: String, email: Option<String>) -> Result<(), String> {
+    use tauri::Manager;
+    let Some((message, email)) = sanitize_feedback(&message, email.as_deref()) else {
+        return Err("feedback message is empty".into());
+    };
+    let settings = app.state::<crate::settings::SettingsStore>().get();
+    send_feedback(settings.device_id, message, email, app.package_info().version.to_string());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sanitize_feedback_trims_caps_and_rejects_empty() {
+        assert_eq!(sanitize_feedback("   ", None), None, "whitespace-only is rejected");
+        assert_eq!(sanitize_feedback("", Some("a@b.com")), None, "no message → nothing to send");
+        let (msg, email) = sanitize_feedback("  love it  ", Some("  me@x.io ")).unwrap();
+        assert_eq!(msg, "love it", "message trimmed");
+        assert_eq!(email.as_deref(), Some("me@x.io"), "email trimmed");
+        assert_eq!(sanitize_feedback("hi", Some("   ")).unwrap().1, None, "blank email → None");
+        // Length caps.
+        let long = "x".repeat(9000);
+        assert_eq!(sanitize_feedback(&long, None).unwrap().0.chars().count(), 5000);
+    }
 
     #[test]
     fn enabled_precedence_off_beats_everything() {

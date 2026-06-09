@@ -146,6 +146,70 @@ function VersionControl() {
   );
 }
 
+// Suggestion box → PostHog (Rust submit_feedback). Explicit, opt-in send that
+// works even when usage telemetry is off; optional email for a reply.
+function FeedbackControl() {
+  const [message, setMessage] = useState("");
+  const [email, setEmail] = useState("");
+  const [state, setState] = useState<"idle" | "sending" | "sent" | "error">("idle");
+
+  const send = useCallback(async () => {
+    if (!message.trim()) {
+      return;
+    }
+    setState("sending");
+    try {
+      await invoke("submit_feedback", { message, email: email.trim() || null });
+      setMessage("");
+      setEmail("");
+      setState("sent");
+    } catch {
+      setState("error");
+    }
+  }, [message, email]);
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, width: "100%", maxWidth: 420 }}>
+      <textarea
+        aria-label="Your suggestion"
+        placeholder="What would make En Tu Cara better?"
+        value={message}
+        onChange={(e) => {
+          setMessage(e.target.value);
+          if (state !== "idle") {
+            setState("idle");
+          }
+        }}
+        rows={4}
+        style={{ font: "inherit", padding: "6px 8px", resize: "vertical" }}
+      />
+      <input
+        type="email"
+        aria-label="Your email (optional)"
+        placeholder="Email (optional, for a reply)"
+        value={email}
+        onChange={(e) => setEmail(e.target.value)}
+        style={{ font: "inherit", padding: "4px 8px" }}
+      />
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+        <button
+          onClick={() => void send()}
+          disabled={state === "sending" || !message.trim()}
+          style={{ font: "inherit", padding: "4px 14px", cursor: "pointer" }}
+        >
+          {state === "sending" ? "Sending…" : "Send"}
+        </button>
+        {state === "sent" && (
+          <span style={{ color: css.secondary, fontSize: 12 }}>Thanks — sent! 🙏</span>
+        )}
+        {state === "error" && (
+          <span style={{ color: css.secondary, fontSize: 12 }}>Couldn't send — try again.</span>
+        )}
+      </span>
+    </div>
+  );
+}
+
 function ControlView({
   def,
   settings,
@@ -381,6 +445,9 @@ function ControlView({
           {control.button}
         </button>
       );
+    }
+    case "feedback": {
+      return <FeedbackControl />;
     }
     case "version": {
       return <VersionControl />;

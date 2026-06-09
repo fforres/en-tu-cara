@@ -9,6 +9,7 @@ export type SectionId =
   | "menu-bar"
   | "appearance"
   | "advanced"
+  | "feedback"
   | "about";
 
 export const SECTIONS: Array<{ id: SectionId; label: string }> = [
@@ -19,6 +20,7 @@ export const SECTIONS: Array<{ id: SectionId; label: string }> = [
   { id: "menu-bar", label: "Menu Bar" },
   { id: "appearance", label: "Appearance" },
   { id: "advanced", label: "Advanced" },
+  { id: "feedback", label: "Feedback" },
   { id: "about", label: "About" },
 ];
 
@@ -58,6 +60,7 @@ export type Control =
   | { kind: "theme" } // theme picker + demo alert button
   | { kind: "select"; key: keyof Settings; options: Array<{ value: string; label: string }> }
   | { kind: "link"; url: string; button: string } // opens a URL in the browser
+  | { kind: "feedback" } // suggestion box → PostHog (submit_feedback)
   | { kind: "version" } // app version + "Check for Updates"
   | { kind: "note" } // description-only (no control)
   | { kind: "placeholder"; note: string }; // documented not-yet feature
@@ -242,6 +245,16 @@ export const REGISTRY: SettingDef[] = [
       "Send anonymized usage telemetry (e.g. whether alerts fired on time, errors) to help improve the app. No event titles, attendees, calendar names, or emails ever leave your Mac — only a random device id and behavioral counts.",
     keywords: ["telemetry", "analytics", "privacy", "posthog", "usage", "tracking", "data"],
     control: { kind: "toggle", key: "telemetry_enabled" },
+  },
+  // ── Feedback ───────────────────────────────────────────────────────────
+  {
+    id: "feedback.send",
+    section: "feedback",
+    label: "Send a suggestion",
+    description:
+      "Tell us what would make En Tu Cara better — bugs, ideas, anything. Sent anonymously; add your email only if you'd like a reply. Works even if usage data sharing is off.",
+    keywords: ["feedback", "suggestion", "idea", "bug", "comment", "contact", "report", "request"],
+    control: { kind: "feedback" },
   },
   // ── About ──────────────────────────────────────────────────────────────
   {

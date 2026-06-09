@@ -111,6 +111,27 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("sends feedback via submit_feedback with the message and optional email", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Feedback" }));
+    fireEvent.change(screen.getByLabelText("Your suggestion"), {
+      target: { value: "add a dark theme" },
+    });
+    fireEvent.change(screen.getByLabelText("Your email (optional)"), {
+      target: { value: "me@x.io" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find((call: unknown[]) => call[0] === "submit_feedback");
+      expect(call).toBeTruthy();
+      expect(call![1].message).toBe("add a dark theme");
+      expect(call![1].email).toBe("me@x.io");
+    });
+    // Confirmation shown and the textarea is cleared for the next note.
+    expect(await screen.findByText(/Thanks/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Your suggestion")).toHaveValue("");
+  });
+
   it("clears a stale error banner once a later save succeeds", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Event Filters" }));
