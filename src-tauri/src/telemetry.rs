@@ -120,16 +120,25 @@ pub fn start(app: &tauri::AppHandle, settings: &crate::settings::Settings) {
     record("calendar_auth_status", json!({ "status": crate::calendar::calendar_authorization_status() }));
 }
 
-/// Properties attached to every event: identity + environment + the anonymity
-/// flag. Built once at init and merged into each event by the worker.
-fn base_properties(distinct_id: &str, account_hash: Option<String>, app_version: &str) -> Map<String, Value> {
+/// Identity + anonymity + environment — the single place the "anonymous,
+/// device-scoped" invariant lives, so the passive-telemetry path and the one-shot
+/// feedback path can't drift on it (notably `$process_person_profiles: false`,
+/// which keeps every event from creating a PostHog person profile).
+fn identity_props(distinct_id: &str, app_version: &str) -> Map<String, Value> {
     let mut m = Map::new();
     m.insert("distinct_id".into(), json!(distinct_id));
     m.insert("$process_person_profiles".into(), json!(false)); // anonymous events
-    m.insert("$lib".into(), json!("entucara-rust"));
-    m.insert("$lib_version".into(), json!(app_version));
     m.insert("app_version".into(), json!(app_version));
     m.insert("os".into(), json!(os_version()));
+    m
+}
+
+/// Properties attached to every passive-telemetry event: the shared identity core
+/// plus the lib/session/account context. Built once at init, merged per event.
+fn base_properties(distinct_id: &str, account_hash: Option<String>, app_version: &str) -> Map<String, Value> {
+    let mut m = identity_props(distinct_id, app_version);
+    m.insert("$lib".into(), json!("entucara-rust"));
+    m.insert("$lib_version".into(), json!(app_version));
     m.insert("session_id".into(), json!(uuid::Uuid::new_v4().to_string()));
     if let Some(h) = account_hash {
         m.insert("account_hash".into(), json!(h));
@@ -274,12 +283,8 @@ fn post_batch(agent: &ureq::Agent, events: Vec<Value>) -> Result<u16, String> {
 /// share; `email` is optional and omitted when blank.
 pub fn send_feedback(distinct_id: String, message: String, email: Option<String>, app_version: String) {
     std::thread::spawn(move || {
-        let mut props = Map::new();
-        props.insert("distinct_id".into(), json!(distinct_id));
-        props.insert("$process_person_profiles".into(), json!(false));
+        let mut props = identity_props(&distinct_id, &app_version);
         props.insert("message".into(), json!(message));
-        props.insert("app_version".into(), json!(app_version));
-        props.insert("os".into(), json!(os_version()));
         if let Some(email) = email.map(|e| e.trim().to_string()).filter(|e| !e.is_empty()) {
             props.insert("email".into(), json!(email));
         }
