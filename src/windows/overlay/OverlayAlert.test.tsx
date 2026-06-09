@@ -85,6 +85,61 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
     });
   });
 
+  it("retries fetch_events so a transient blip doesn't permanently strip Join", async () => {
+    // M4: the Join link is resolved from a SEPARATE fetch_events (the alarm
+    // payload carries no URL). A transient EventKit failure at mount used to
+    // leave events empty forever → no Join button, exactly when the user most
+    // needs it. The overlay must retry a FAILED read until it succeeds.
+    vi.useFakeTimers();
+    try {
+      const ZOOM = "https://us04web.zoom.us/j/123456789";
+      let fetchCalls = 0;
+      invokeMock.mockImplementation((cmd: string) => {
+        if (cmd === "get_active_alarms") {
+          return Promise.resolve([ALARM_A]);
+        }
+        if (cmd === "fetch_events") {
+          fetchCalls += 1;
+          // First attempt blips; the retry succeeds with the linked event.
+          return fetchCalls === 1
+            ? Promise.reject(new Error("EventKit blip"))
+            : Promise.resolve([
+                {
+                  id: "EK-A",
+                  occurrence_key: "(A @ t)",
+                  title: "Standup",
+                  start: null,
+                  end: null,
+                  all_day: false,
+                  status: "confirmed",
+                  my_rsvp: "accepted",
+                  is_recurring_occurrence: false,
+                  calendar_title: "Work",
+                  calendar_id: "work",
+                  url: null,
+                  location: null,
+                  notes: `Join: ${ZOOM}`,
+                },
+              ]);
+        }
+        if (cmd === "get_settings") {
+          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+        }
+        return Promise.resolve(undefined);
+      });
+      render(<OverlayAlert />);
+      // First fetch failed → no Join yet.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(screen.queryByText("📹 Join")).not.toBeInTheDocument();
+      // The retry (1s backoff) succeeds → Join appears.
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(screen.getByText("📹 Join")).toBeInTheDocument();
+      expect(fetchCalls).toBeGreaterThanOrEqual(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("re-lands focus on Dismiss when the card set swaps without changing count", async () => {
     render(<OverlayAlert />);
     await screen.findByText("Standup");

@@ -144,11 +144,6 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             scheduler::maybe_run_fire_spike(app.handle());
 
-            // DIAGNOSTIC: ENTUCARA_SPIKE_TOGGLE=<n> → drive the popover open/close
-            // n times to reproduce the open/close crash without manual clicking.
-            #[cfg(target_os = "macos")]
-            tray::maybe_run_toggle_spike(app.handle());
-
             // Visual checks / dev convenience: open the settings window on launch
             // (after the 2s setup-grace — window creation during setup is the
             // known abort trap).
