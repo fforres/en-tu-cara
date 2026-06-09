@@ -408,6 +408,20 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
     Ok(calendars?.iter().map(calendar_dto).collect())
 }
 
+/// Best-effort, non-reversible identifier for the user's calendar "org": the
+/// sha256 of the first calendar account that looks like an email (its `source`,
+/// e.g. "felipe@skyward.ai"). Used ONLY as a coarse telemetry grouping key — we
+/// never send the raw email. Returns None when access isn't granted yet or no
+/// account carries an email (self-heals on a later launch once access exists).
+pub fn primary_account_hash() -> Option<String> {
+    let calendars = list_calendars().ok()?;
+    let email = calendars
+        .into_iter()
+        .filter_map(|c| c.account)
+        .find(|a| a.contains('@'))?;
+    Some(crate::telemetry::sha256_hex(email.trim().to_ascii_lowercase().as_bytes()))
+}
+
 #[tauri::command]
 pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, String> {
     let t0 = std::time::Instant::now();

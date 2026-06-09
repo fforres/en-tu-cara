@@ -187,11 +187,80 @@ pub fn hide_popover(app: AppHandle) {
     let _ = app;
 }
 
-/// Menu-bar title beside the icon ("🔥 ENGINE… · 23m"). None clears it.
+/// Menu-bar title beside the icon ("🔥 ENGINE… · 23m"). `None` clears it.
+///
+/// We clear by setting an EMPTY STRING, not `None`: passing `None` was observed
+/// to leave the previous title in place on macOS, which froze a finished event
+/// in the menu bar for hours (it never updated once `next_event_title` started
+/// returning `None`). An empty title reliably blanks the text next to the icon.
 pub fn set_tray_title(app: &AppHandle, title: Option<String>) {
     if let Some(tray) = app.tray_by_id("main") {
-        let _ = tray.set_title(title);
+        let _ = tray.set_title(Some(title.clone().unwrap_or_default()));
     }
+    // Edge-triggered (logs only on an actual change, like the event-presence log)
+    // so the log shows a clean timeline of the next-event countdown ticking down
+    // and clearing — the ground truth for verifying the title isn't frozen
+    // (the menu-bar title can't be read back via screencapture/CGWindowList).
+    if let Ok(mut last) = LAST_TRAY_TITLE.lock() {
+        if *last != title {
+            log::debug!("menu-bar title → {}", title.as_deref().unwrap_or("(cleared)"));
+            *last = title;
+        }
+    }
+}
+
+/// Last applied menu-bar title, for the edge-triggered change log in `set_tray_title`.
+static LAST_TRAY_TITLE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Owned snapshot of the menu-bar candidates from the latest calendar poll. The
+/// title is re-derived from this against the LIVE clock by a short-interval loop
+/// (see `scheduler::spawn_menu_bar_loop`), so the countdown stays current and a
+/// just-finished event drops off within ~10s WITHOUT re-hitting EventKit — only
+/// `now` changes between calendar polls, not the event set.
+#[derive(Clone)]
+pub struct OwnedCandidate {
+    pub title: String,
+    pub start: chrono::DateTime<chrono::Utc>,
+    pub all_day: bool,
+    pub status: String,
+}
+
+static MENU_BAR_SNAPSHOT: std::sync::Mutex<Vec<OwnedCandidate>> = std::sync::Mutex::new(Vec::new());
+
+/// Replace the menu-bar candidate snapshot (called after each calendar read — the
+/// scheduler poll and the popover refresh).
+pub fn set_menu_bar_snapshot(snapshot: Vec<OwnedCandidate>) {
+    if let Ok(mut g) = MENU_BAR_SNAPSHOT.lock() {
+        *g = snapshot;
+    }
+}
+
+/// Re-derive and apply the menu-bar "next event" title from the current snapshot
+/// against the live clock. THE one place the title is applied — the scheduler
+/// poll, the popover refresh, and the short-interval loop all funnel through here
+/// so they can never compute it differently. Must run on the main thread.
+pub fn refresh_menu_bar_title(app: &AppHandle) {
+    let settings = app.state::<crate::settings::SettingsStore>().get();
+    if !settings.show_next_event_in_menu_bar {
+        set_tray_title(app, None);
+        return;
+    }
+    let now = crate::testmode::clock::now();
+    let snapshot = MENU_BAR_SNAPSHOT
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_default();
+    let candidates: Vec<MenuBarCandidate> = snapshot
+        .iter()
+        .map(|c| MenuBarCandidate {
+            title: &c.title,
+            start: c.start,
+            all_day: c.all_day,
+            status: &c.status,
+        })
+        .collect();
+    let title = next_event_title(&candidates, now, settings.menu_bar_title_chars as usize);
+    set_tray_title(app, title);
 }
 
 /// Minimal projection of an event for the menu-bar title. Both `AlarmEvent`
@@ -250,29 +319,25 @@ pub fn refresh_popover(
     days_forward: i64,
 ) -> Result<Vec<crate::calendar::EventDto>, String> {
     let events = crate::calendar::fetch_events(days_back, days_forward)?;
-    let settings = app.state::<crate::settings::SettingsStore>().get();
-    let title = if settings.show_next_event_in_menu_bar {
-        let now = crate::testmode::clock::now();
-        let candidates: Vec<MenuBarCandidate> = events
-            .iter()
-            .filter_map(|e| {
-                Some(MenuBarCandidate {
-                    title: &e.title,
-                    start: chrono::DateTime::parse_from_rfc3339(&e.start)
-                        .ok()?
-                        .with_timezone(&chrono::Utc),
-                    all_day: e.all_day,
-                    status: &e.status,
-                })
+    // Refresh the menu-bar snapshot from the SAME events the popover shows, then
+    // re-derive the title — one derivation, so the title can't drift from the
+    // list, and the short-interval loop keeps it fresh from this same snapshot.
+    let snapshot: Vec<OwnedCandidate> = events
+        .iter()
+        .filter_map(|e| {
+            Some(OwnedCandidate {
+                title: e.title.clone(),
+                start: chrono::DateTime::parse_from_rfc3339(&e.start)
+                    .ok()?
+                    .with_timezone(&chrono::Utc),
+                all_day: e.all_day,
+                status: e.status.clone(),
             })
-            .collect();
-        next_event_title(&candidates, now, settings.menu_bar_title_chars as usize)
-    } else {
-        None
-    };
-    // Runs on the main thread (Tauri IPC) — set the title directly, like the
-    // scheduler does via run_on_main_thread.
-    set_tray_title(&app, title);
+        })
+        .collect();
+    set_menu_bar_snapshot(snapshot);
+    // Runs on the main thread (Tauri IPC) — apply directly.
+    refresh_menu_bar_title(&app);
     Ok(events)
 }
 
@@ -516,6 +581,32 @@ mod tests {
             MenuBarCandidate { title: "Later", start: at("2026-06-08T10:00:00Z"), all_day: false, status: "confirmed" },
         ];
         assert_eq!(next_event_title(&cands, now, 20).as_deref(), Some("Standup · 5m"));
+    }
+
+    #[test]
+    fn countdown_decrements_as_now_advances_then_clears_once_started() {
+        // The regression fence for the "frozen dead event in the menu bar" bug:
+        // against a FIXED event start, as `now` advances the minutes count DOWN,
+        // and the instant the event has started it drops out (None → the title
+        // clears). The live 10s loop calls this with the real clock, so the
+        // menu-bar countdown moves and a finished event can't linger.
+        let c = vec![MenuBarCandidate {
+            title: "Standup",
+            start: at("2026-06-08T09:10:00Z"),
+            all_day: false,
+            status: "confirmed",
+        }];
+        assert_eq!(next_event_title(&c, at("2026-06-08T09:00:00Z"), 20).as_deref(), Some("Standup · 10m"));
+        assert_eq!(next_event_title(&c, at("2026-06-08T09:01:00Z"), 20).as_deref(), Some("Standup · 9m"));
+        assert_eq!(next_event_title(&c, at("2026-06-08T09:05:00Z"), 20).as_deref(), Some("Standup · 5m"));
+        // 30s out floors to a visible "1m", never "0m".
+        assert_eq!(next_event_title(&c, at("2026-06-08T09:09:30Z"), 20).as_deref(), Some("Standup · 1m"));
+        // At start and well past it → no longer upcoming → cleared (the bug).
+        assert!(next_event_title(&c, at("2026-06-08T09:10:00Z"), 20).is_none());
+        assert!(
+            next_event_title(&c, at("2026-06-08T11:10:00Z"), 20).is_none(),
+            "an event 2h dead must not linger in the menu bar"
+        );
     }
 
     #[test]

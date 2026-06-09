@@ -9,6 +9,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 import { resolveTheme, type Theme } from "./themes";
 import type { UiEvent } from "../tray/TrayPopover";
+import { capture } from "../../telemetry";
 
 interface AlarmPayload {
   occurrence_key: string;
@@ -225,6 +226,10 @@ export function OverlayAlert() {
               <button
                 onClick={async () => {
                   const key = alarm.occurrence_key;
+                  // Join is the one action Rust can't observe (it opens a URL,
+                  // then dismisses). Record it here so we can tell joins apart
+                  // from plain dismissals.
+                  capture("alarm_joined");
                   try {
                     if (isWebUrl(link.url)) {
                       await openUrl(link.url);

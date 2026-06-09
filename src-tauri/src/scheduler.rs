@@ -234,7 +234,13 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
     // The forward window is 2 days, not 1, so a DST "spring forward" day (a 23h
     // wall-clock day) can never clip the next 24h of events out of the query.
     // Over-fetching is free — compute_actions filters by time.
-    crate::calendar::fetch_events(1, 2)
+    let fetched = crate::calendar::fetch_events(1, 2);
+    if let Err(ref e) = fetched {
+        // A read failing here means the alarm pipeline is starved — record it
+        // (reason only; no event content is involved in a failed read).
+        crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
+    }
+    fetched
         .unwrap_or_default()
         .into_iter()
         .filter(|e| match (&settings.enabled_calendar_ids, &e.calendar_id) {
@@ -277,6 +283,10 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         let mut last = lock_resilient(&LAST_EVENT_PRESENCE);
         if let Some(msg) = presence_transition(*last, events.len()) {
             log::info!("{msg}");
+            crate::telemetry::record(
+                "event_presence_change",
+                serde_json::json!({ "count": events.len() }),
+            );
         }
         *last = Some(!events.is_empty());
     }
@@ -332,14 +342,31 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             }
             let _ = tx.send(result.map(|_| ()).map_err(|e| e.to_string()));
         });
+        let occurrence_hash = crate::telemetry::sha256_hex(action.occurrence_key.as_bytes());
         match rx.recv_timeout(Duration::from_secs(5)) {
             Ok(Ok(())) => {
                 state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
+                // The product's defining success event: an alert actually shown.
+                // `late_ms` = how far past the scheduled time it fired (the
+                // "did it fire on time" signal). occurrence_key is hashed — never
+                // sent in the clear (it embeds the calendar event id).
+                crate::telemetry::record(
+                    "alarm_fired",
+                    serde_json::json!({
+                        "occurrence_hash": occurrence_hash,
+                        "kind": action.kind,
+                        "late_ms": (now - action.due_at).num_milliseconds(),
+                    }),
+                );
             }
             Ok(Err(e)) => {
                 log::error!(
                     "overlay show failed for {}: {e}; leaving unmarked to retry next tick",
                     action.occurrence_key
+                );
+                crate::telemetry::record(
+                    "overlay_show_failed",
+                    serde_json::json!({ "occurrence_hash": occurrence_hash, "reason": e }),
                 );
             }
             Err(_) => {
@@ -347,32 +374,33 @@ fn tick(app: &tauri::AppHandle) -> u64 {
                     "overlay show timed out for {}; leaving unmarked to retry next tick",
                     action.occurrence_key
                 );
+                crate::telemetry::record(
+                    "overlay_show_failed",
+                    serde_json::json!({ "occurrence_hash": occurrence_hash, "reason": "timeout" }),
+                );
             }
         }
     }
 
-    // Menu-bar next-event title (user req): "Title… · 12m". Cleared when disabled
-    // or nothing upcoming. Derived by the SAME tray::next_event_title the popover
-    // refresh uses — one computation, so the menu-bar text and the popover list
-    // can't drift. This is the background (popover-closed) trigger; opening the
-    // popover refreshes it immediately via refresh_popover.
-    let title = if settings.show_next_event_in_menu_bar {
-        let candidates: Vec<crate::tray::MenuBarCandidate> = events
-            .iter()
-            .map(|e| crate::tray::MenuBarCandidate {
-                title: &e.title,
-                start: e.start,
-                all_day: e.all_day,
-                status: &e.status,
-            })
-            .collect();
-        crate::tray::next_event_title(&candidates, now, settings.menu_bar_title_chars as usize)
-    } else {
-        None
-    };
+    // Menu-bar next-event title (user req): "Title… · 12m". Refresh the snapshot
+    // from THIS poll's events, then re-derive + apply. The snapshot also feeds the
+    // short-interval `spawn_menu_bar_loop`, which re-derives the title against the
+    // live clock every ~10s — so the countdown stays current and a finished event
+    // drops off promptly, without waiting for (or re-running) this ≤30s calendar
+    // poll. Opening the popover refreshes the same snapshot via refresh_popover.
+    let snapshot: Vec<crate::tray::OwnedCandidate> = events
+        .iter()
+        .map(|e| crate::tray::OwnedCandidate {
+            title: e.title.clone(),
+            start: e.start,
+            all_day: e.all_day,
+            status: e.status.clone(),
+        })
+        .collect();
+    crate::tray::set_menu_bar_snapshot(snapshot);
     {
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || crate::tray::set_tray_title(&handle, title));
+        let _ = app.run_on_main_thread(move || crate::tray::refresh_menu_bar_title(&handle));
     }
 
     // Wall-clock arming: wake at the next due alarm (capped) or the poll backstop.
@@ -404,6 +432,7 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
             Ok(secs) => secs,
             Err(_) => {
                 log::error!("scheduler tick panicked; backing off 5s and continuing");
+                crate::telemetry::log_event("error", "scheduler", "tick panicked; backing off 5s");
                 5
             }
         };
@@ -418,6 +447,25 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         } else {
             std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
         }
+        }
+    });
+}
+
+/// Dedicated menu-bar title refresher. Re-derives the "next event" title from the
+/// latest calendar snapshot against the LIVE clock every 10s — independent of the
+/// ≤30s alarm poll. This is what keeps the countdown current and drops a finished
+/// event within ~10s; previously the title only changed when the alarm poll
+/// happened to re-run, so a finished event could linger in the menu bar. Cheap:
+/// no EventKit access, just a recompute over the cached snapshot + a title set.
+pub fn spawn_menu_bar_loop(app: &tauri::AppHandle) {
+    let app = app.clone();
+    std::thread::spawn(move || {
+        // Match the scheduler's setup grace — no window/tray work in the first 2s.
+        std::thread::sleep(Duration::from_secs(2));
+        loop {
+            let handle = app.clone();
+            let _ = app.run_on_main_thread(move || crate::tray::refresh_menu_bar_title(&handle));
+            std::thread::sleep(Duration::from_secs(10));
         }
     });
 }
@@ -490,6 +538,13 @@ pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64)
     let state = app.state::<SharedState>();
     let until = crate::testmode::clock::now() + ChronoDuration::minutes(minutes);
     state.update(|a| a.snooze(&occurrence_key, until));
+    crate::telemetry::record(
+        "alarm_snoozed",
+        serde_json::json!({
+            "occurrence_hash": crate::telemetry::sha256_hex(occurrence_key.as_bytes()),
+            "minutes": minutes,
+        }),
+    );
     finish_one(&app, &occurrence_key);
 }
 
@@ -498,6 +553,16 @@ pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64)
 /// Dismiss-all stays the blunt "get everything off my screen" escape hatch.
 #[tauri::command]
 pub fn dismiss_alarms(app: tauri::AppHandle, occurrence_key: Option<String>) {
+    match &occurrence_key {
+        Some(key) => crate::telemetry::record(
+            "alarm_dismissed",
+            serde_json::json!({
+                "occurrence_hash": crate::telemetry::sha256_hex(key.as_bytes()),
+                "scope": "one",
+            }),
+        ),
+        None => crate::telemetry::record("alarm_dismissed", serde_json::json!({ "scope": "all" })),
+    }
     match occurrence_key {
         Some(key) => finish_one(&app, &key),
         None => {

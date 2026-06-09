@@ -25,6 +25,8 @@ const DEFAULTS: Settings = {
   theme: "frost-dark",
   tray_icon: "auto",
   onboarded: true,
+  telemetry_enabled: true,
+  device_id: "test-device-id",
 };
 
 const CALENDARS = [

@@ -43,6 +43,10 @@ export interface Settings {
   tray_icon: string;
   /** First-run onboarding completed (not a user-facing setting; gates onboarding). */
   onboarded: boolean;
+  /** Anonymized usage telemetry → PostHog. Opt-out; default on. */
+  telemetry_enabled: boolean;
+  /** Stable random per-install id (telemetry distinct_id). Minted by Rust; not user-facing. */
+  device_id: string;
 }
 
 export type Control =
@@ -229,6 +233,15 @@ export const REGISTRY: SettingDef[] = [
     description: "Timeout for automatic closing (when enabled).",
     keywords: ["timeout", "minutes"],
     control: { kind: "number", key: "auto_close_minutes", min: 1, max: 120, unit: "min" },
+  },
+  {
+    id: "advanced.telemetry",
+    section: "advanced",
+    label: "Share anonymized usage data",
+    description:
+      "Send anonymized usage telemetry (e.g. whether alerts fired on time, errors) to help improve the app. No event titles, attendees, calendar names, or emails ever leave your Mac — only a random device id and behavioral counts.",
+    keywords: ["telemetry", "analytics", "privacy", "posthog", "usage", "tracking", "data"],
+    control: { kind: "toggle", key: "telemetry_enabled" },
   },
   // ── About ──────────────────────────────────────────────────────────────
   {
