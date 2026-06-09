@@ -46,8 +46,11 @@ REAL calendar event) · `ENTUCARA_OPEN_SETTINGS=<1|section>` · `ENTUCARA_SPIKE_
    fire); `.userInitiated` alone does NOT defeat App Nap. Measured: 0–1ms on AC.
 8. Occurrence identity = `(event_id @ occurrence_start)`; the same meeting
    appears once per subscribed calendar — `dedup_events` collapses by that key.
-9. EKEventStore is `!Send` — `refresh_sources` uses a thread_local store and
-   must stay on the scheduler thread.
+9. EKEventStore is `!Send` — `refresh_sources` uses a thread_local store, so it
+   is safe from BOTH the scheduler tick and the main-thread `fetch_events`
+   command (each thread gets its own instance; the store is never shared). It
+   does `refreshSourcesIfNecessary` + `reset` so a read SYNCS (picks up external
+   deletes/edits) instead of serving this process's first-access cache.
 
 ## Do NOT
 

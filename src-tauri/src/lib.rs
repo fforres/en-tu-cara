@@ -219,9 +219,23 @@ pub fn run() {
             // Apply the saved tray-icon style now that settings are loaded (the
             // tray was built with the template default in tray::setup above).
             tray::apply_tray_icon(app.handle(), &settings_store.get().tray_icon);
+            let onboarded = settings_store.get().onboarded;
             app.manage(settings_store);
             #[cfg(target_os = "macos")]
             scheduler::spawn_loop(app.handle());
+
+            // Startup pre-flight: auto-prompt for calendar access if a returning
+            // (already-onboarded) user's grant was lost — e.g. a rebuild re-signs
+            // the app with a new ad-hoc identity and TCC resets it to
+            // NotDetermined — so they never have to find the "Grant calendar
+            // access" button. New users are driven by onboarding instead. Skipped
+            // in test mode (the test harness manages its own TCC fixture).
+            #[cfg(target_os = "macos")]
+            if onboarded && !testmode::is_test_mode() {
+                calendar::preflight_calendar_access(app.handle().clone());
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = onboarded;
 
             // Launch at login per settings (default on). Skipped in test mode AND
             // in ALL debug builds: a dev binary must never register a LaunchAgent
