@@ -82,12 +82,12 @@ pub fn is_enabled(settings_enabled: bool) -> bool {
     )
 }
 
-/// Start the telemetry worker. Call once, from app setup. When `enabled` is false
-/// this is a no-op and every later `record()` cheaply does nothing.
+/// Start the telemetry worker (internal; the app calls `start`). When `enabled` is
+/// false this is a no-op and every later `record()` cheaply does nothing.
 ///
 /// `distinct_id` is the persisted device UUID; `account_hash` the coarse,
 /// best-effort org key (may be None); `app_version` the running build.
-pub fn init(enabled: bool, distinct_id: String, account_hash: Option<String>, app_version: String) {
+fn init(enabled: bool, distinct_id: String, account_hash: Option<String>, app_version: String) {
     let sink = if enabled {
         let (tx, rx) = std::sync::mpsc::sync_channel::<Value>(QUEUE_CAP);
         let envelope = base_properties(&distinct_id, account_hash, &app_version);
@@ -102,6 +102,22 @@ pub fn init(enabled: bool, distinct_id: String, account_hash: Option<String>, ap
     // If init is somehow called twice, the first wins; the second's channel drops
     // and its (unstarted-from-our-view) state is discarded. Single call expected.
     let _ = SINK.set(sink);
+}
+
+/// Bring telemetry up for the running app and emit the startup events. The single
+/// entry point the app calls at boot — it owns the enabled decision, the
+/// best-effort account hash, and the `#[cfg]` platform dance, so none of that
+/// leaks into `lib.rs`'s setup.
+pub fn start(app: &tauri::AppHandle, settings: &crate::settings::Settings) {
+    let enabled = is_enabled(settings.telemetry_enabled);
+    #[cfg(target_os = "macos")]
+    let account_hash = if enabled { crate::calendar::primary_account_hash() } else { None };
+    #[cfg(not(target_os = "macos"))]
+    let account_hash: Option<String> = None;
+    init(enabled, settings.device_id.clone(), account_hash, app.package_info().version.to_string());
+    record("app_started", json!({}));
+    #[cfg(target_os = "macos")]
+    record("calendar_auth_status", json!({ "status": crate::calendar::calendar_authorization_status() }));
 }
 
 /// Properties attached to every event: identity + environment + the anonymity
@@ -226,10 +242,11 @@ fn flush(agent: &ureq::Agent, url: &str, batch: &mut Vec<Value>) {
     if batch.is_empty() {
         return;
     }
+    let count = batch.len();
     let body = json!({ "api_key": POSTHOG_KEY, "batch": std::mem::take(batch) });
     match agent.post(url).header("content-type", "application/json").send_json(&body) {
-        Ok(_) => {}
-        Err(e) => log::debug!("telemetry flush failed (dropped, will not retry): {e}"),
+        Ok(resp) => log::debug!("telemetry flushed {count} event(s) (HTTP {})", resp.status()),
+        Err(e) => log::debug!("telemetry flush failed (dropped {count}, will not retry): {e}"),
     }
 }
 

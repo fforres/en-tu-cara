@@ -234,29 +234,10 @@ pub fn run() {
             let onboarded = settings_store.get().onboarded;
 
             // Anonymized telemetry (PostHog) — opt-out, off in test mode unless
-            // ENTUCARA_TELEMETRY=on. Init BEFORE the scheduler so the first ticks'
-            // events are captured. The worker runs on its own thread behind a
-            // drop-on-full queue and can never stall an alarm (see telemetry.rs).
-            {
-                let s = settings_store.get();
-                let enabled = telemetry::is_enabled(s.telemetry_enabled);
-                #[cfg(target_os = "macos")]
-                let account_hash = if enabled { calendar::primary_account_hash() } else { None };
-                #[cfg(not(target_os = "macos"))]
-                let account_hash: Option<String> = None;
-                telemetry::init(
-                    enabled,
-                    s.device_id.clone(),
-                    account_hash,
-                    app.package_info().version.to_string(),
-                );
-            }
-            telemetry::record("app_started", serde_json::json!({}));
-            #[cfg(target_os = "macos")]
-            telemetry::record(
-                "calendar_auth_status",
-                serde_json::json!({ "status": calendar::calendar_authorization_status() }),
-            );
+            // ENTUCARA_TELEMETRY=on. Started BEFORE the scheduler so the first
+            // ticks' events are captured. The worker runs on its own thread behind
+            // a drop-on-full queue and can never stall an alarm (see telemetry.rs).
+            telemetry::start(app.handle(), &settings_store.get());
 
             app.manage(settings_store);
             #[cfg(target_os = "macos")]

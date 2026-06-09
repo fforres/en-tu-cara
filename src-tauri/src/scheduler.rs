@@ -553,19 +553,19 @@ pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64)
 /// Dismiss-all stays the blunt "get everything off my screen" escape hatch.
 #[tauri::command]
 pub fn dismiss_alarms(app: tauri::AppHandle, occurrence_key: Option<String>) {
-    match &occurrence_key {
-        Some(key) => crate::telemetry::record(
-            "alarm_dismissed",
-            serde_json::json!({
-                "occurrence_hash": crate::telemetry::sha256_hex(key.as_bytes()),
-                "scope": "one",
-            }),
-        ),
-        None => crate::telemetry::record("alarm_dismissed", serde_json::json!({ "scope": "all" })),
-    }
     match occurrence_key {
-        Some(key) => finish_one(&app, &key),
+        Some(key) => {
+            crate::telemetry::record(
+                "alarm_dismissed",
+                serde_json::json!({
+                    "occurrence_hash": crate::telemetry::sha256_hex(key.as_bytes()),
+                    "scope": "one",
+                }),
+            );
+            finish_one(&app, &key);
+        }
         None => {
+            crate::telemetry::record("alarm_dismissed", serde_json::json!({ "scope": "all" }));
             lock_resilient(&ACTIVE_ALARMS).clear();
             crate::overlay::close_overlays(app);
         }
