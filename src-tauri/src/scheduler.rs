@@ -289,6 +289,24 @@ fn upcoming_alarm_events(
     (parsed, Some(outcome))
 }
 
+/// Evaluate calendar-access health for one real read and act on any transition.
+/// Owns the access state + downtime statics so `tick` stays scannable. Pure
+/// decision lives in `access::evaluate_access`; this is its stateful driver.
+fn check_calendar_access(app: &tauri::AppHandle, fetch: crate::access::FetchOutcome) {
+    let auth = crate::calendar::authorization_status_kind();
+    let mut last = lock_resilient(&LAST_ACCESS_STATE);
+    let eval = crate::access::evaluate_access(*last, auth, fetch);
+    if let Some(edge) = eval.edge {
+        on_access_edge(app, &edge);
+    }
+    // Track downtime (consecutive Lost ticks) for the recovery report.
+    match eval.state {
+        crate::access::AccessState::Lost => *lock_resilient(&ACCESS_DOWN_TICKS) += 1,
+        crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
+    }
+    *last = Some(eval.state);
+}
+
 /// React to a calendar-access transition. Edge-triggered (runs ONCE per Ok↔Lost
 /// transition, not every tick). Everything here must be non-blocking — it runs
 /// inside the tick, which must never stall the alarm path; the loud surfaces and
@@ -336,23 +354,11 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         }
         *last = Some(!events.is_empty());
     }
-    // Edge-triggered calendar-access health (only for real reads — see
-    // upcoming_alarm_events). This is the guard against the silent "lost access →
-    // 0 events → no alarm" failure: it shouts + self-heals on the transition,
-    // never gating the fire path below.
+    // Edge-triggered calendar-access health (only for real reads). The guard
+    // against the silent "lost access → 0 events → no alarm" failure; it shouts +
+    // self-heals on the transition and never gates the fire path below.
     if let Some(fetch) = fetch_outcome {
-        let auth = crate::calendar::authorization_status_kind();
-        let mut last = lock_resilient(&LAST_ACCESS_STATE);
-        let eval = crate::access::evaluate_access(*last, auth, fetch);
-        if let Some(edge) = eval.edge {
-            on_access_edge(app, &edge);
-        }
-        // Track downtime for the recovery report.
-        match eval.state {
-            crate::access::AccessState::Lost => *lock_resilient(&ACCESS_DOWN_TICKS) += 1,
-            crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
-        }
-        *last = Some(eval.state);
+        check_calendar_access(app, fetch);
     }
     let state = app.state::<SharedState>();
 
