@@ -507,8 +507,8 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         let sleep_secs = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| tick(&app))) {
             Ok(secs) => secs,
             Err(_) => {
+                // log::error! auto-ships to PostHog via the obs tracing layer.
                 log::error!("scheduler tick panicked; backing off 5s and continuing");
-                crate::telemetry::log_event("error", "scheduler", "tick panicked; backing off 5s");
                 5
             }
         };

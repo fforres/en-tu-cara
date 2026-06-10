@@ -187,18 +187,6 @@ pub fn record(event: &str, props: Value) {
     }
 }
 
-/// Forward a Rust log line as a `rust_log` event. Phase-1 "logs from Rust": we
-/// emit this at the operationally meaningful warn/error sites (overlay-show
-/// failure, calendar-sync failure, panics) rather than bridging the whole `log`
-/// facade — tauri-plugin-log already owns the global logger, and the full log
-/// stream is the job of the phase-2 OTLP pipeline. Never sends user content.
-pub fn log_event(level: &str, target: &str, message: impl Into<String>) {
-    record(
-        "rust_log",
-        json!({ "level": level, "target": target, "message": message.into() }),
-    );
-}
-
 /// The worker: owns the only network code. Batches events and flushes on size or
 /// time. All failures are swallowed (telemetry must never crash the app).
 fn worker(rx: Receiver<Value>, envelope: Map<String, Value>) {
@@ -391,7 +379,6 @@ mod tests {
     fn record_is_a_noop_when_uninitialized() {
         // SINK is unset in the unit-test process: record must not panic or block.
         record("never_sent", json!({"a": 1}));
-        log_event("warn", "test", "no sink, no crash");
     }
 
     #[test]

@@ -510,7 +510,10 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
     let t0 = std::time::Instant::now();
     log::debug!("fetch_events: enter back={days_back} fwd={days_forward}");
     if !authorized_to_read() {
-        log::warn!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
+        // debug, not warn: this fires every scheduler tick during a lost-access
+        // episode. The access-health machine (access.rs) owns the loud, once-per-
+        // edge signal + telemetry; this stays in the local file for triage.
+        log::debug!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
     // Sync before reading so externally deleted/edited events don't linger.
@@ -526,7 +529,9 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
     });
     match &events {
         Ok(e) => log::debug!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
-        Err(e) => log::warn!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
+        // debug, not warn: per-tick during a lost-access episode (access.rs owns
+        // the loud edge signal). Kept in the local file for triage.
+        Err(e) => log::debug!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
     Ok(dedup_events(events?.iter().map(event_dto).collect()))
 }
