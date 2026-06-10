@@ -240,6 +240,44 @@ fn env_test_events() -> Option<Vec<AlarmEvent>> {
 /// outcome that drives the access-health machine. Injected/test-mode events
 /// return `None` (no real read happened) so the access alarm never trips during
 /// tests even on a binary that holds no TCC grant.
+/// Test-only forced calendar-access reading (ENTUCARA_TEST_ACCESS), so the
+/// access-health machine + loud surfaces are testable without real EventKit
+/// failures. Format: `<reason>[,recover_after=<secs>]` where reason ∈
+/// ok | fetch_failed | not_determined | denied. With `recover_after`, it flips to
+/// healthy after that many seconds from launch — exercising the full
+/// lost→(debounced announce)→recovered flow in one run. Returns None outside
+/// test mode or when unset.
+fn test_access_override() -> Option<(crate::access::AuthKind, crate::access::FetchOutcome)> {
+    use crate::access::{AuthKind, FetchOutcome};
+    if !crate::testmode::is_test_mode() {
+        return None;
+    }
+    use std::sync::OnceLock;
+    // (reason, recover_after_secs, launch_base)
+    type AccessSpec = (String, Option<i64>, DateTime<Utc>);
+    static SPEC: OnceLock<Option<AccessSpec>> = OnceLock::new();
+    let spec = SPEC
+        .get_or_init(|| {
+            let raw = std::env::var("ENTUCARA_TEST_ACCESS").ok()?;
+            let mut parts = raw.split(',');
+            let reason = parts.next()?.trim().to_string();
+            let recover_after = parts
+                .find_map(|p| p.trim().strip_prefix("recover_after=").and_then(|v| v.parse().ok()));
+            Some((reason, recover_after, Utc::now()))
+        })
+        .clone();
+    let (reason, recover_after, base) = spec?;
+    if recover_after.is_some_and(|s| (crate::testmode::clock::now() - base).num_seconds() >= s) {
+        return Some((AuthKind::FullAccess, FetchOutcome::Ok));
+    }
+    Some(match reason.as_str() {
+        "ok" => (AuthKind::FullAccess, FetchOutcome::Ok),
+        "not_determined" => (AuthKind::NotDetermined, FetchOutcome::Failed),
+        "denied" => (AuthKind::DeniedOrRestricted, FetchOutcome::Failed),
+        _ => (AuthKind::FullAccess, FetchOutcome::Failed), // "fetch_failed" / default
+    })
+}
+
 fn upcoming_alarm_events(
     settings: &crate::settings::Settings,
 ) -> (Vec<AlarmEvent>, Option<crate::access::FetchOutcome>) {
@@ -294,8 +332,11 @@ fn upcoming_alarm_events(
 /// Evaluate calendar-access health for one real read and act on any transition.
 /// Owns the access state + downtime statics so `tick` stays scannable. Pure
 /// decision lives in `access::evaluate_access`; this is its stateful driver.
-fn check_calendar_access(app: &tauri::AppHandle, fetch: crate::access::FetchOutcome) {
-    let auth = crate::calendar::authorization_status_kind();
+fn check_calendar_access(
+    app: &tauri::AppHandle,
+    auth: crate::access::AuthKind,
+    fetch: crate::access::FetchOutcome,
+) {
     let (raw, reason) = crate::access::classify(auth, fetch);
     // Self-heal BEFORE the debounce announces: on any failing read, force a fresh
     // event store for the next tick. If a stale store was all it was, the next
@@ -361,11 +402,16 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         }
         *last = Some(!events.is_empty());
     }
-    // Edge-triggered calendar-access health (only for real reads). The guard
-    // against the silent "lost access → 0 events → no alarm" failure; it shouts +
-    // self-heals on the transition and never gates the fire path below.
-    if let Some(fetch) = fetch_outcome {
-        check_calendar_access(app, fetch);
+    // Edge-triggered calendar-access health. Real reads supply (live auth, fetch
+    // outcome); test mode can force the reading via ENTUCARA_TEST_ACCESS so the
+    // lost→recover flow + the loud surfaces are deterministically testable
+    // without real EventKit failures. The guard against the silent "lost access →
+    // 0 events → no alarm" failure; it shouts + self-heals on the transition and
+    // never gates the fire path below.
+    let access_inputs = test_access_override()
+        .or_else(|| fetch_outcome.map(|f| (crate::calendar::authorization_status_kind(), f)));
+    if let Some((auth, fetch)) = access_inputs {
+        check_calendar_access(app, auth, fetch);
     }
     let state = app.state::<SharedState>();
 

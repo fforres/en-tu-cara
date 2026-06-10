@@ -3,7 +3,13 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const openUrlMock = vi.hoisted(() => vi.fn(() => Promise.resolve()));
+const listeners = vi.hoisted(() => new Map<string, (e: { payload: unknown }) => void>());
+const listenMock = vi.hoisted(() => (name: string, cb: (e: { payload: unknown }) => void) => {
+  listeners.set(name, cb);
+  return Promise.resolve(() => listeners.delete(name));
+});
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 vi.mock("@tauri-apps/plugin-opener", () => ({ openUrl: openUrlMock }));
 
 import { TrayPopover, type UiEvent } from "./TrayPopover";
@@ -37,6 +43,7 @@ let ignoredSet: string[] = [];
 
 beforeEach(() => {
   ignoredSet = [];
+  listeners.clear();
   invokeMock.mockReset();
   openUrlMock.mockReset();
   openUrlMock.mockResolvedValue(undefined);
@@ -70,6 +77,22 @@ describe("TrayPopover", () => {
   it("renders the header", () => {
     render(<TrayPopover />);
     expect(screen.getByText("En Tu Cara")).toBeInTheDocument();
+  });
+
+  it("shows the access-lost banner but KEEPS showing the (stale) events", async () => {
+    render(<TrayPopover />);
+    // Events render normally first.
+    expect(await screen.findByText("Design sync")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+    // A live access-lost edge raises the banner — without removing the events
+    // (preserve-on-failure: last-known events stay, flagged as maybe-outdated).
+    listeners.get("access-state-changed")?.({ payload: { state: "lost" } });
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/may be outdated/i);
+    expect(screen.getByText("Design sync")).toBeInTheDocument();
+    // Recovery clears the banner.
+    listeners.get("access-state-changed")?.({ payload: { state: "ok" } });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("'Open videocall' button opens the videocall/join link (not the web event)", async () => {

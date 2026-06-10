@@ -311,6 +311,11 @@ pub fn invalidate_event_store() {
 ///      settings "Grant calendar access" button routes to System Settings).
 pub fn attempt_self_heal(app: &tauri::AppHandle, _reason: &str) {
     invalidate_event_store();
+    // Never re-prompt (which relaunches on grant) during a test run — the access
+    // machine is being driven by ENTUCARA_TEST_ACCESS, not a real grant.
+    if crate::testmode::is_test_mode() {
+        return;
+    }
     if matches!(EventsManager::authorization_status(), AuthorizationStatus::NotDetermined) {
         let mut last = LAST_SELF_HEAL_PROMPT.lock().unwrap_or_else(|e| e.into_inner());
         let now = std::time::Instant::now();
