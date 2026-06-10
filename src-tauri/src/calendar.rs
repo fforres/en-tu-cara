@@ -251,25 +251,76 @@ fn sync_event_store() {
     // EKEventStore is !Send. A thread_local gives each CALLING thread its own
     // instance (the scheduler tick AND the main-thread fetch_events command) —
     // never shared across threads, so the !Send invariant holds on both paths.
+    // The store is held per-thread AND tagged with a generation. When
+    // `invalidate_event_store` bumps the global generation (on system wake, or
+    // when the access machine sees reads failing), each thread rebuilds its store
+    // on the next read — because a store whose connection to the calendar daemon
+    // died (after sleep, or a TCC reset) keeps returning stale "no data" forever
+    // otherwise. We can't reach another thread's store, so the generation is how
+    // we signal "rebuild on next use" across threads (extends gotcha #9).
     thread_local! {
-        static STORE: Retained<EKEventStore> = unsafe { EKEventStore::new() };
+        static STORE: std::cell::RefCell<(u64, Retained<EKEventStore>)> =
+            std::cell::RefCell::new((0, unsafe { EKEventStore::new() }));
     }
-    STORE.with(|store| unsafe {
-        // Make a read a SYNC, not a stale pull (bug: an event deleted/edited in
-        // Google/Calendar.app while we're running kept re-appearing in the tray
-        // + alerts):
-        //   1. refreshSourcesIfNecessary asks remote accounts (CalDAV/Exchange/
-        //      Google) to push their latest down into the local store.
-        //   2. reset drops THIS process's cached EKEvent objects so the next
-        //      eventsMatchingPredicate re-reads the persistent store. Without it
-        //      a long-running agent keeps serving the snapshot it cached on
-        //      first access — Calendar.app looks correct (it resets on its own
-        //      EKEventStoreChanged notifications) while we lag indefinitely.
-        // We never write events (read-only agent), so reset discarding unsaved
-        // changes is a no-op for us.
-        store.refreshSourcesIfNecessary();
-        store.reset();
+    let generation = STORE_GENERATION.load(std::sync::atomic::Ordering::Relaxed);
+    STORE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if cell.0 != generation {
+            cell.1 = unsafe { EKEventStore::new() };
+            cell.0 = generation;
+        }
+        unsafe {
+            // Make a read a SYNC, not a stale pull (bug: an event deleted/edited in
+            // Google/Calendar.app while we're running kept re-appearing in the tray
+            // + alerts):
+            //   1. refreshSourcesIfNecessary asks remote accounts (CalDAV/Exchange/
+            //      Google) to push their latest down into the local store.
+            //   2. reset drops THIS process's cached EKEvent objects so the next
+            //      eventsMatchingPredicate re-reads the persistent store. Without it
+            //      a long-running agent keeps serving the snapshot it cached on
+            //      first access — Calendar.app looks correct (it resets on its own
+            //      EKEventStoreChanged notifications) while we lag indefinitely.
+            // We never write events (read-only agent), so reset discarding unsaved
+            // changes is a no-op for us.
+            cell.1.refreshSourcesIfNecessary();
+            cell.1.reset();
+        }
     });
+}
+
+/// Bumped to force every thread's EKEventStore to rebuild on its next read.
+static STORE_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Last time we re-prompted for access, to rate-limit self-heal re-prompts so a
+/// persistently-NotDetermined state can't spawn a prompt on every Lost edge.
+static LAST_SELF_HEAL_PROMPT: std::sync::Mutex<Option<std::time::Instant>> =
+    std::sync::Mutex::new(None);
+
+/// Force a fresh EKEventStore on the next read from every thread. Cheap (an
+/// atomic bump); the actual rebuild happens lazily in `sync_event_store`.
+pub fn invalidate_event_store() {
+    STORE_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Try to recover from a detected access loss, without blocking the caller:
+///   1. Rebuild the (possibly stale) event store on the next read — fixes the
+///      "status says fine but reads return nothing" case after sleep.
+///   2. If the grant was actually reset (NotDetermined), re-prompt — but at most
+///      once per cooldown, so a stuck-NotDetermined state can't prompt forever.
+///      Denied/Restricted are left alone (re-prompt is a silent no-op; the tray /
+///      settings "Grant calendar access" button routes to System Settings).
+pub fn attempt_self_heal(app: &tauri::AppHandle, _reason: &str) {
+    invalidate_event_store();
+    if matches!(EventsManager::authorization_status(), AuthorizationStatus::NotDetermined) {
+        let mut last = LAST_SELF_HEAL_PROMPT.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        let due = last.is_none_or(|t| now.duration_since(t) >= std::time::Duration::from_secs(300));
+        if due {
+            *last = Some(now);
+            log::info!("self-heal: access NotDetermined → re-prompting");
+            prompt_access_off_main(app.clone());
+        }
+    }
 }
 
 /// Cheap video-link presence check for the alarm policy (only_video_events).
@@ -290,6 +341,20 @@ pub fn has_meeting_link(url: Option<&str>, location: Option<&str>, notes: Option
 #[tauri::command]
 pub fn calendar_authorization_status() -> String {
     format!("{:?}", EventsManager::authorization_status())
+}
+
+/// The coarse authorization kind the access-health machine acts on (pure enum,
+/// free of the `eventkit` type). Anything that isn't FullAccess/Denied/Restricted
+/// (NotDetermined, write-only, unknown) is treated as NotDetermined — i.e. "can't
+/// read", which the machine reads as access lost.
+pub fn authorization_status_kind() -> crate::access::AuthKind {
+    match EventsManager::authorization_status() {
+        AuthorizationStatus::FullAccess => crate::access::AuthKind::FullAccess,
+        AuthorizationStatus::Denied | AuthorizationStatus::Restricted => {
+            crate::access::AuthKind::DeniedOrRestricted
+        }
+        _ => crate::access::AuthKind::NotDetermined,
+    }
 }
 
 /// Open System Settings → Privacy & Security → Calendars.

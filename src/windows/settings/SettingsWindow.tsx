@@ -5,6 +5,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import {
   REGISTRY,
   SECTIONS,
@@ -207,6 +208,46 @@ function FeedbackControl() {
         )}
       </span>
     </div>
+  );
+}
+
+// Export local logs → Downloads + clipboard (Rust export_logs). For handing
+// diagnostics to a maintainer when something breaks.
+function ExportLogsControl() {
+  const [state, setState] = useState<
+    { kind: "idle" | "exporting" | "error" } | { kind: "done"; path: string }
+  >({ kind: "idle" });
+
+  const run = useCallback(async () => {
+    setState({ kind: "exporting" });
+    try {
+      const path = await invoke<string>("export_logs");
+      setState({ kind: "done", path });
+    } catch {
+      setState({ kind: "error" });
+    }
+  }, []);
+
+  return (
+    <span
+      style={{ display: "inline-flex", flexDirection: "column", gap: 6, alignItems: "flex-start" }}
+    >
+      <button
+        onClick={() => void run()}
+        disabled={state.kind === "exporting"}
+        style={{ font: "inherit", padding: "4px 12px", cursor: "pointer" }}
+      >
+        {state.kind === "exporting" ? "Exporting…" : "Export logs"}
+      </button>
+      {state.kind === "done" && (
+        <span style={{ color: css.secondary, fontSize: 12, userSelect: "text" }}>
+          Saved to {state.path} (and copied to clipboard)
+        </span>
+      )}
+      {state.kind === "error" && (
+        <span style={{ color: css.secondary, fontSize: 12 }}>Couldn't export logs.</span>
+      )}
+    </span>
   );
 }
 
@@ -449,6 +490,9 @@ function ControlView({
     case "feedback": {
       return <FeedbackControl />;
     }
+    case "export-logs": {
+      return <ExportLogsControl />;
+    }
     case "version": {
       return <VersionControl />;
     }
@@ -477,6 +521,11 @@ export function SettingsWindow() {
     return SECTIONS.some((s) => s.id === fromUrl) ? (fromUrl as SectionId) : "general";
   });
   const [error, setError] = useState<string | null>(null);
+  // Calendar-access health, surfaced as a banner. The Rust scheduler emits
+  // `access-state-changed` on the Ok↔Lost edge; we also pull on mount in case
+  // the window opened AFTER the transition (the overlay's pull-and-listen
+  // pattern). This is the loud, in-app half of "never silently stop alerting."
+  const [accessLost, setAccessLost] = useState(false);
   // Mirror of `settings` so `update` can merge patches without a stale closure
   // and WITHOUT calling invoke inside a setState updater (which StrictMode runs
   // twice → double set_settings).
@@ -512,6 +561,22 @@ export function SettingsWindow() {
     // Telemetry may not have finished init when this window mounts; ensure it,
     // then record the open (no-op if telemetry is disabled).
     void initTelemetry().then(() => capture("settings_opened"));
+  }, [refreshCalendars]);
+
+  // Calendar-access banner: pull current state on mount + listen for live edges.
+  useEffect(() => {
+    invoke<{ state: string }>("get_access_state")
+      .then((s) => setAccessLost(s?.state === "lost"))
+      .catch(() => {});
+    const unlisten = listen<{ state: string }>("access-state-changed", (e) => {
+      setAccessLost(e.payload.state === "lost");
+      if (e.payload.state === "ok") {
+        refreshCalendars();
+      }
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
   }, [refreshCalendars]);
 
   const update = useCallback((patch: Partial<Settings>) => {
@@ -631,6 +696,32 @@ export function SettingsWindow() {
 
       {/* Content */}
       <section style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
+        {accessLost && (
+          <div
+            role="alert"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 12,
+              padding: "10px 12px",
+              marginBottom: 12,
+              borderRadius: 8,
+              background: "color-mix(in srgb, crimson 16%, Canvas)",
+              border: "1px solid color-mix(in srgb, crimson 45%, transparent)",
+            }}
+          >
+            <span style={{ fontSize: 13, flex: 1 }}>
+              ⚠️ <strong>Calendar access was lost — alerts are paused.</strong> En Tu Cara can't
+              read your calendar, so no meeting alerts will fire until access is restored.
+            </span>
+            <button
+              onClick={onGrantCalendar}
+              style={{ font: "inherit", fontWeight: 600, padding: "5px 12px", cursor: "pointer" }}
+            >
+              Grant calendar access
+            </button>
+          </div>
+        )}
         {error && <div style={{ color: "crimson", fontSize: 12, marginBottom: 8 }}>{error}</div>}
         {searching && (
           <div style={{ color: css.secondary, fontSize: 12, marginBottom: 10 }}>

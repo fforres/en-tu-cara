@@ -89,9 +89,97 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// Log export (Settings → Advanced → Export logs)
+// ---------------------------------------------------------------------------
+
+/// Filesystem-safe name for an exported log bundle. Pure (testable): any char
+/// that isn't alphanumeric becomes '-' so a timestamp's colons can't break it.
+fn export_file_name(ts: &str) -> String {
+    let safe: String = ts
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    format!("en-tu-cara-logs-{safe}.log")
+}
+
+/// The `*.log` files in `dir`, sorted by name (so daily-rolled files read in
+/// chronological order). Empty if the dir can't be read.
+fn collect_log_paths(dir: &Path) -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .collect();
+    paths.sort();
+    paths
+}
+
+#[cfg(target_os = "macos")]
+fn copy_to_clipboard(text: &str) {
+    use std::io::Write;
+    if let Ok(mut child) = std::process::Command::new("pbcopy")
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        let _ = child.wait();
+    }
+}
+
+/// Bundle the local log files into a single timestamped file in ~/Downloads and
+/// copy the contents to the clipboard. Local logs are always written (even when
+/// telemetry shipping is off), so this is how a user hands us logs to debug an
+/// issue. Returns the written path for the UI to show.
+#[tauri::command]
+pub fn export_logs(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri::Manager;
+    let mut blob = String::new();
+    for path in collect_log_paths(&logs_dir()) {
+        if let Ok(contents) = std::fs::read_to_string(&path) {
+            blob.push_str(&format!("===== {} =====\n", path.display()));
+            blob.push_str(&contents);
+            blob.push('\n');
+        }
+    }
+    if blob.is_empty() {
+        blob.push_str("(no logs recorded yet)\n");
+    }
+    let downloads = app.path().download_dir().map_err(|e| e.to_string())?;
+    let dest = downloads.join(export_file_name(&chrono::Utc::now().to_rfc3339()));
+    std::fs::write(&dest, &blob).map_err(|e| e.to_string())?;
+    #[cfg(target_os = "macos")]
+    copy_to_clipboard(&blob);
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn export_file_name_is_filesystem_safe() {
+        let name = export_file_name("2026-06-10T16:30:00Z");
+        assert_eq!(name, "en-tu-cara-logs-2026-06-10T16-30-00Z.log");
+        assert!(!name.contains(':'), "colons would break the filename on some tools");
+    }
+
+    #[test]
+    fn collect_log_paths_picks_log_files_sorted() {
+        let dir = std::env::temp_dir().join(format!("entucara-logs-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("en-tu-cara.2026-06-09.log"), b"a").unwrap();
+        std::fs::write(dir.join("en-tu-cara.2026-06-10.log"), b"b").unwrap();
+        std::fs::write(dir.join("notes.txt"), b"skip").unwrap();
+        let paths = collect_log_paths(&dir);
+        assert_eq!(paths.len(), 2, "only .log files");
+        assert!(paths[0].to_string_lossy().contains("2026-06-09"), "sorted chronologically");
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn prefers_xdg_config_home_when_set() {

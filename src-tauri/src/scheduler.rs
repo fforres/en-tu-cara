@@ -107,6 +107,14 @@ pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new())
 /// transition log below. None = no tick has run yet.
 static LAST_EVENT_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
 
+/// Last-seen calendar-access health, for the edge-triggered access alarm. None =
+/// no REAL calendar read has happened yet (test/injected runs never write it).
+static LAST_ACCESS_STATE: Mutex<Option<crate::access::AccessState>> = Mutex::new(None);
+
+/// Count of consecutive ticks spent in the Lost state — a no-PII "how long were
+/// alerts down" proxy reported on recovery.
+static ACCESS_DOWN_TICKS: Mutex<u32> = Mutex::new(0);
+
 /// Decide whether a per-tick event count warrants an INFO line. We log only on
 /// the EDGE (had events → 0, or 0 → had events), never every tick: the steady
 /// state is silent, but "my calendar went empty" / "events came back" — the
@@ -134,6 +142,14 @@ fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 #[tauri::command]
 pub fn get_active_alarms() -> Vec<serde_json::Value> {
     lock_resilient(&ACTIVE_ALARMS).clone()
+}
+
+/// Current calendar-access health, for the Settings banner to read on mount (it
+/// also listens for live `access-state-changed` events). `None`/`Ok` → "ok".
+#[tauri::command]
+pub fn get_access_state() -> serde_json::Value {
+    let lost = matches!(*lock_resilient(&LAST_ACCESS_STATE), Some(crate::access::AccessState::Lost));
+    serde_json::json!({ "state": if lost { "lost" } else { "ok" } })
 }
 
 #[derive(Debug, Deserialize)]
@@ -218,13 +234,19 @@ fn env_test_events() -> Option<Vec<AlarmEvent>> {
         .clone()
 }
 
-fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent> {
+/// Returns the upcoming alarm events AND, for REAL calendar reads, the fetch
+/// outcome that drives the access-health machine. Injected/test-mode events
+/// return `None` (no real read happened) so the access alarm never trips during
+/// tests even on a binary that holds no TCC grant.
+fn upcoming_alarm_events(
+    settings: &crate::settings::Settings,
+) -> (Vec<AlarmEvent>, Option<crate::access::FetchOutcome>) {
     if let Some(injected) = lock_resilient(&INJECTED_EVENTS).clone() {
-        return injected;
+        return (injected, None);
     }
     if crate::testmode::is_test_mode() {
         if let Some(env_events) = env_test_events() {
-            return env_events;
+            return (env_events, None);
         }
     }
     // THE canonical event read (sync + dedup + enabled-calendar filter), shared
@@ -234,12 +256,17 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
     // can't clip the next 24h); over-fetching is free, compute_actions filters by
     // time.
     let events = crate::calendar::active_events(&settings.enabled_calendar_ids, 1, 2);
+    let outcome = if events.is_ok() {
+        crate::access::FetchOutcome::Ok
+    } else {
+        crate::access::FetchOutcome::Failed
+    };
     if let Err(ref e) = events {
         // A read failing here means the alarm pipeline is starved — record it
         // (reason only; no event content is involved in a failed read).
         crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
     }
-    events
+    let parsed = events
         .unwrap_or_default()
         .into_iter()
         .filter_map(|e| {
@@ -258,7 +285,32 @@ fn upcoming_alarm_events(settings: &crate::settings::Settings) -> Vec<AlarmEvent
                 my_rsvp: e.my_rsvp,
             })
         })
-        .collect()
+        .collect();
+    (parsed, Some(outcome))
+}
+
+/// React to a calendar-access transition. Edge-triggered (runs ONCE per Ok↔Lost
+/// transition, not every tick). Everything here must be non-blocking — it runs
+/// inside the tick, which must never stall the alarm path; the loud surfaces and
+/// self-heal all dispatch via spawn / run_on_main_thread / try_send.
+fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge) {
+    match edge {
+        crate::access::AccessEdge::Lost { reason } => {
+            log::warn!("calendar access lost ({reason}) — alerts are paused until it is restored");
+            crate::telemetry::record("calendar_access_lost", serde_json::json!({ "reason": reason }));
+            // Loud surfaces (notification + menu-bar badge + settings banner).
+            crate::access::announce_lost(app, reason);
+            // Self-heal: recreate the (possibly stale) event store and, if the
+            // grant was reset, re-prompt. Spawns its own work — does not block.
+            crate::calendar::attempt_self_heal(app, reason);
+        }
+        crate::access::AccessEdge::Restored => {
+            let down = *lock_resilient(&ACCESS_DOWN_TICKS);
+            log::info!("calendar access restored — alerts active again (was down {down} tick(s))");
+            crate::telemetry::record("calendar_access_restored", serde_json::json!({ "down_ticks": down }));
+            crate::access::announce_restored(app);
+        }
+    }
 }
 
 /// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
@@ -271,7 +323,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         alert_pending: settings.alert_pending,
         only_video_events: settings.only_video_events,
     };
-    let events = upcoming_alarm_events(&settings);
+    let (events, fetch_outcome) = upcoming_alarm_events(&settings);
     {
         // Edge-triggered "calendar went empty / came back" signal (INFO).
         let mut last = lock_resilient(&LAST_EVENT_PRESENCE);
@@ -283,6 +335,24 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             );
         }
         *last = Some(!events.is_empty());
+    }
+    // Edge-triggered calendar-access health (only for real reads — see
+    // upcoming_alarm_events). This is the guard against the silent "lost access →
+    // 0 events → no alarm" failure: it shouts + self-heals on the transition,
+    // never gating the fire path below.
+    if let Some(fetch) = fetch_outcome {
+        let auth = crate::calendar::authorization_status_kind();
+        let mut last = lock_resilient(&LAST_ACCESS_STATE);
+        let eval = crate::access::evaluate_access(*last, auth, fetch);
+        if let Some(edge) = eval.edge {
+            on_access_edge(app, &edge);
+        }
+        // Track downtime for the recovery report.
+        match eval.state {
+            crate::access::AccessState::Lost => *lock_resilient(&ACCESS_DOWN_TICKS) += 1,
+            crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
+        }
+        *last = Some(eval.state);
     }
     let state = app.state::<SharedState>();
 
@@ -341,15 +411,21 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             Ok(Ok(())) => {
                 state.update(|a| a.mark_fired(&action.occurrence_key, action.kind, now));
                 // The product's defining success event: an alert actually shown.
-                // `late_ms` = how far past the scheduled time it fired (the
-                // "did it fire on time" signal). occurrence_key is hashed — never
-                // sent in the clear (it embeds the calendar event id).
+                // Logged at INFO (previously unlogged) so the local file shows a
+                // clean "fired on time" timeline during triage. `late_ms` = how
+                // far past the scheduled time it fired. occurrence_key is hashed —
+                // never sent in the clear (it embeds the calendar event id).
+                let late_ms = (now - action.due_at).num_milliseconds();
+                log::info!(
+                    "alarm fired: kind={:?} occurrence_hash={occurrence_hash} late_ms={late_ms}",
+                    action.kind
+                );
                 crate::telemetry::record(
                     "alarm_fired",
                     serde_json::json!({
                         "occurrence_hash": occurrence_hash,
                         "kind": action.kind,
-                        "late_ms": (now - action.due_at).num_milliseconds(),
+                        "late_ms": late_ms,
                     }),
                 );
             }
@@ -432,6 +508,13 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         };
 
         // Windowed precision assertion: close-in alarms get latencyCritical.
+        // Bracket the sleep with WALL-CLOCK readings: thread::sleep is suspended
+        // during system sleep, so if far more wall-clock elapsed than we asked
+        // for, the Mac slept — and an EKEventStore's connection to the calendar
+        // daemon often dies across sleep, then serves stale "no data" forever
+        // (the lost-access incident). On detecting a wake, force the store to
+        // rebuild so the next tick reads fresh instead of failing for ≤2 ticks.
+        let before = crate::testmode::clock::now();
         if sleep_secs <= 120 {
             let _assertion = ActivityAssertion::begin(
                 NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical,
@@ -441,8 +524,21 @@ pub fn spawn_loop(app: &tauri::AppHandle) {
         } else {
             std::thread::sleep(Duration::from_secs(sleep_secs.max(1)));
         }
+        let actual = (crate::testmode::clock::now() - before).num_seconds();
+        if looks_like_wake(sleep_secs.max(1), actual) {
+            log::info!("woke from sleep (~{actual}s vs {sleep_secs}s asked) — refreshing calendar store");
+            crate::calendar::invalidate_event_store();
+        }
         }
     });
+}
+
+/// True when far more wall-clock time elapsed across a sleep than requested — the
+/// signal the machine was asleep (App Nap jitter stays well under the margin; a
+/// real sleep adds minutes/hours). Pure, for testing. Drives the post-wake store
+/// rebuild instead of a fragile NSWorkspace observer.
+fn looks_like_wake(requested_secs: u64, actual_secs: i64) -> bool {
+    actual_secs > requested_secs as i64 + 60
 }
 
 /// Dedicated menu-bar title refresher. Re-derives the "next event" title from the
@@ -701,6 +797,18 @@ mod tests {
         assert!(went_empty.contains("0 events"), "got: {went_empty}");
         let came_back = presence_transition(Some(false), 3).expect("non-empty edge logs");
         assert!(came_back.contains('3'), "got: {came_back}");
+    }
+
+    #[test]
+    fn looks_like_wake_detects_sleep_not_jitter() {
+        // Normal cadence / App Nap jitter must NOT look like a wake…
+        assert!(!looks_like_wake(30, 30));
+        assert!(!looks_like_wake(30, 45));
+        assert!(!looks_like_wake(30, 89), "just under the 60s margin");
+        // …a real multi-minute/hour sleep must.
+        assert!(looks_like_wake(30, 120));
+        assert!(looks_like_wake(30, 3600));
+        assert!(looks_like_wake(1, 600));
     }
 
     #[test]

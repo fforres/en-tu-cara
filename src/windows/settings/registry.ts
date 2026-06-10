@@ -61,6 +61,7 @@ export type Control =
   | { kind: "select"; key: keyof Settings; options: Array<{ value: string; label: string }> }
   | { kind: "link"; url: string; button: string } // opens a URL in the browser
   | { kind: "feedback" } // suggestion box → PostHog (submit_feedback)
+  | { kind: "export-logs" } // save local logs to Downloads + clipboard (export_logs)
   | { kind: "version" } // app version + "Check for Updates"
   | { kind: "note" } // description-only (no control)
   | { kind: "placeholder"; note: string }; // documented not-yet feature
@@ -236,6 +237,15 @@ export const REGISTRY: SettingDef[] = [
     description: "Timeout for automatic closing (when enabled).",
     keywords: ["timeout", "minutes"],
     control: { kind: "number", key: "auto_close_minutes", min: 1, max: 120, unit: "min" },
+  },
+  {
+    id: "advanced.export-logs",
+    section: "advanced",
+    label: "Export logs",
+    description:
+      "Save En Tu Cara's local logs to your Downloads folder and copy them to the clipboard, so you can attach them to a bug report. Logs are kept on your Mac and contain no event titles or personal calendar contents.",
+    keywords: ["logs", "log", "debug", "diagnostics", "export", "troubleshoot", "support", "bug"],
+    control: { kind: "export-logs" },
   },
   {
     id: "advanced.telemetry",

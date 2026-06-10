@@ -236,6 +236,24 @@ pub struct OwnedCandidate {
 
 static MENU_BAR_SNAPSHOT: std::sync::Mutex<Vec<OwnedCandidate>> = std::sync::Mutex::new(Vec::new());
 
+/// When `Some`, an alert-affecting problem (e.g. lost calendar access) that must
+/// OVERRIDE the next-event title in the menu bar. The access machine sets/clears
+/// it on the Lost/Restored edge so a broken state is impossible to miss.
+static ACCESS_BADGE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Set (or clear with `None`) the menu-bar warning badge and apply it. Safe to
+/// call from any thread (e.g. the scheduler's access-edge handler): the title is
+/// applied via run_on_main_thread (NSStatusItem must be touched on the main
+/// thread), so this is also non-blocking. Takes precedence over the next-event
+/// countdown in `refresh_menu_bar_title`.
+pub fn set_access_badge(app: &AppHandle, badge: Option<String>) {
+    if let Ok(mut g) = ACCESS_BADGE.lock() {
+        *g = badge;
+    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || refresh_menu_bar_title(&handle));
+}
+
 /// Replace the menu-bar candidate snapshot (called after each calendar read — the
 /// scheduler poll and the popover refresh).
 pub fn set_menu_bar_snapshot(snapshot: Vec<OwnedCandidate>) {
@@ -249,6 +267,13 @@ pub fn set_menu_bar_snapshot(snapshot: Vec<OwnedCandidate>) {
 /// poll, the popover refresh, and the short-interval loop all funnel through here
 /// so they can never compute it differently. Must run on the main thread.
 pub fn refresh_menu_bar_title(app: &AppHandle) {
+    // A lost-access (or other alert-affecting) warning OVERRIDES the next-event
+    // countdown — a broken alerting state must never be hidden behind a normal
+    // title. Checked first so it wins regardless of the show-next-event setting.
+    if let Some(badge) = ACCESS_BADGE.lock().ok().and_then(|g| g.clone()) {
+        set_tray_title(app, Some(badge));
+        return;
+    }
     let settings = app.state::<crate::settings::SettingsStore>().get();
     if !settings.show_next_event_in_menu_bar {
         set_tray_title(app, None);

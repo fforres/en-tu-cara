@@ -1,7 +1,9 @@
 //! En Tu Cara — unmissable meeting alerts for macOS. Fully local (EventKit only).
 //! Architecture: see PLAN.md.
 
+mod access;
 mod alarm_core;
+mod identity;
 #[cfg(target_os = "macos")]
 mod calendar;
 #[cfg(target_os = "macos")]
@@ -130,6 +132,7 @@ pub fn run() {
             overlay::close_overlays,
             scheduler::inject_events,
             scheduler::get_active_alarms,
+            scheduler::get_access_state,
             scheduler::demo_alert,
             scheduler::snooze_alarm,
             scheduler::dismiss_alarms,
@@ -152,6 +155,7 @@ pub fn run() {
             settings::list_system_sounds,
             telemetry::telemetry_config,
             telemetry::submit_feedback,
+            paths::export_logs,
         ])
         .setup(|app| {
             log::info!(
@@ -240,6 +244,11 @@ pub fn run() {
             // ticks' events are captured. The worker runs on its own thread behind
             // a drop-on-full queue and can never stall an alarm (see telemetry.rs).
             telemetry::start(app.handle(), &settings_store.get());
+            // Log the running code-signing identity — an identity change vs the
+            // TCC-granted one is THE root cause of the silent lost-access bug, so
+            // make it visible in every log. Off-thread (shells codesign).
+            #[cfg(target_os = "macos")]
+            identity::log_signing_identity(app.package_info().version.to_string());
 
             app.manage(settings_store);
             #[cfg(target_os = "macos")]
