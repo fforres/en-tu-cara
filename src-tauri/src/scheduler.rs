@@ -107,9 +107,11 @@ pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new())
 /// transition log below. None = no tick has run yet.
 static LAST_EVENT_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
 
-/// Last-seen calendar-access health, for the edge-triggered access alarm. None =
-/// no REAL calendar read has happened yet (test/injected runs never write it).
-static LAST_ACCESS_STATE: Mutex<Option<crate::access::AccessState>> = Mutex::new(None);
+/// Debounced calendar-access health tracker (announces a transition only after
+/// it's held for a couple ticks — see access::AccessTracker). Only real reads
+/// feed it (test/injected runs never do).
+static ACCESS_TRACKER: Mutex<crate::access::AccessTracker> =
+    Mutex::new(crate::access::AccessTracker::new());
 
 /// Count of consecutive ticks spent in the Lost state — a no-PII "how long were
 /// alerts down" proxy reported on recovery.
@@ -148,7 +150,7 @@ pub fn get_active_alarms() -> Vec<serde_json::Value> {
 /// also listens for live `access-state-changed` events). `None`/`Ok` → "ok".
 #[tauri::command]
 pub fn get_access_state() -> serde_json::Value {
-    let lost = matches!(*lock_resilient(&LAST_ACCESS_STATE), Some(crate::access::AccessState::Lost));
+    let lost = lock_resilient(&ACCESS_TRACKER).announced() == crate::access::AccessState::Lost;
     serde_json::json!({ "state": if lost { "lost" } else { "ok" } })
 }
 
@@ -294,17 +296,22 @@ fn upcoming_alarm_events(
 /// decision lives in `access::evaluate_access`; this is its stateful driver.
 fn check_calendar_access(app: &tauri::AppHandle, fetch: crate::access::FetchOutcome) {
     let auth = crate::calendar::authorization_status_kind();
-    let mut last = lock_resilient(&LAST_ACCESS_STATE);
-    let eval = crate::access::evaluate_access(*last, auth, fetch);
-    if let Some(edge) = eval.edge {
-        on_access_edge(app, &edge);
-    }
-    // Track downtime (consecutive Lost ticks) for the recovery report.
-    match eval.state {
-        crate::access::AccessState::Lost => *lock_resilient(&ACCESS_DOWN_TICKS) += 1,
+    let (raw, reason) = crate::access::classify(auth, fetch);
+    // Self-heal BEFORE the debounce announces: on any failing read, force a fresh
+    // event store for the next tick. If a stale store was all it was, the next
+    // read succeeds and the debounce never announces — recovery is silent (no
+    // useless "lost"/"Grant access" notification for an already-valid grant).
+    match raw {
+        crate::access::AccessState::Lost => {
+            crate::calendar::invalidate_event_store();
+            *lock_resilient(&ACCESS_DOWN_TICKS) += 1;
+        }
         crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
     }
-    *last = Some(eval.state);
+    let edge = lock_resilient(&ACCESS_TRACKER).observe(raw, reason);
+    if let Some(edge) = edge {
+        on_access_edge(app, &edge);
+    }
 }
 
 /// React to a calendar-access transition. Edge-triggered (runs ONCE per Ok↔Lost
