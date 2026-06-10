@@ -103,14 +103,20 @@ fn export_file_name(ts: &str) -> String {
     format!("en-tu-cara-logs-{safe}.log")
 }
 
-/// The `*.log` files in `dir`, sorted by name (so daily-rolled files read in
-/// chronological order). Empty if the dir can't be read.
+/// Our log files in `dir`, sorted by name so daily-rolled files read in
+/// chronological order. Matches both `en-tu-cara.log` and tracing-appender's
+/// rolled `en-tu-cara.log.YYYY-MM-DD` (whose extension is the date, not `log`).
+/// Empty if the dir can't be read.
 fn collect_log_paths(dir: &Path) -> Vec<PathBuf> {
     let mut paths: Vec<PathBuf> = std::fs::read_dir(dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().is_some_and(|x| x == "log"))
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("en-tu-cara") && n.contains(".log"))
+        })
         .collect();
     paths.sort();
     paths
@@ -172,12 +178,18 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("entucara-logs-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("en-tu-cara.2026-06-09.log"), b"a").unwrap();
-        std::fs::write(dir.join("en-tu-cara.2026-06-10.log"), b"b").unwrap();
+        // tracing-appender daily naming: en-tu-cara.log.<date> (+ the live file).
+        std::fs::write(dir.join("en-tu-cara.log"), b"live").unwrap();
+        std::fs::write(dir.join("en-tu-cara.log.2026-06-09"), b"a").unwrap();
+        std::fs::write(dir.join("en-tu-cara.log.2026-06-10"), b"b").unwrap();
         std::fs::write(dir.join("notes.txt"), b"skip").unwrap();
         let paths = collect_log_paths(&dir);
-        assert_eq!(paths.len(), 2, "only .log files");
-        assert!(paths[0].to_string_lossy().contains("2026-06-09"), "sorted chronologically");
+        assert_eq!(paths.len(), 3, "our log files, not unrelated ones");
+        assert!(
+            paths.iter().all(|p| p.to_string_lossy().contains("en-tu-cara")),
+            "only our logs"
+        );
+        assert!(paths[1].to_string_lossy().contains("2026-06-09"), "sorted chronologically");
         let _ = std::fs::remove_dir_all(dir);
     }
 
