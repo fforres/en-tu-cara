@@ -23,9 +23,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Public, write-only PostHog project token (safe to embed; see module docs).
-const POSTHOG_KEY: &str = "phc_L2ELKHRyIWk4Ql8tQ01dude2RalWeJF1lgBF79SBqMY";
+/// `pub(crate)` so the obs OTLP-logs layer reuses the same key.
+pub(crate) const POSTHOG_KEY: &str = "phc_L2ELKHRyIWk4Ql8tQ01dude2RalWeJF1lgBF79SBqMY";
 /// US-cloud ingest host (project 16058 lives on US).
-const POSTHOG_HOST: &str = "https://us.i.posthog.com";
+pub(crate) const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 
 /// Bounded queue depth. Sized so a transient network stall buffers a little, but
 /// a sustained one drops rather than growing memory — we'd rather lose telemetry

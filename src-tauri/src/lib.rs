@@ -236,6 +236,16 @@ pub fn run() {
             // ticks' events are captured. The worker runs on its own thread behind
             // a drop-on-full queue and can never stall an alarm (see telemetry.rs).
             telemetry::start(app.handle(), &settings_store.get());
+            // Gate log shipping (PostHog events + OTLP logs) on the same opt-out,
+            // and stamp the OTLP resource. Local file logging stays on regardless.
+            {
+                let s = settings_store.get();
+                obs::configure_shipping(
+                    telemetry::is_enabled(s.telemetry_enabled),
+                    s.device_id.clone(),
+                    app.package_info().version.to_string(),
+                );
+            }
             // Log the running code-signing identity — an identity change vs the
             // TCC-granted one is THE root cause of the silent lost-access bug, so
             // make it visible in every log. Off-thread (shells codesign).
