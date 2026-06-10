@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "En Tu Cara (dev)",
+  "identifier": "dev.fforres.entucara.dev"
+}

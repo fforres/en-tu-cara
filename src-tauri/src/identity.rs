@@ -15,6 +15,27 @@ pub struct SigningInfo {
     pub authority: String,
 }
 
+/// The production bundle id (TCC-keyed) and the stable Developer-ID team that
+/// must sign it. A build under the prod id signed by anything else is ad-hoc /
+/// local — macOS will reset its calendar grant. Dev builds use a separate
+/// identifier (see tauri.dev.conf.json) so they never touch the prod grant.
+const PROD_IDENTIFIER: &str = "dev.fforres.entucara";
+const DEVELOPER_ID_TEAM: &str = "M4M27973Q7";
+
+/// A loud warning when this build will silently lose calendar access: it's
+/// running under the PRODUCTION bundle id but isn't signed by the Developer-ID
+/// team (so it's ad-hoc/local and TCC will reset the grant). None when it's the
+/// real release, or a dev build under its own identifier. Pure + tested.
+fn identity_warning(identifier: &str, team: &str) -> Option<String> {
+    (identifier == PROD_IDENTIFIER && team != DEVELOPER_ID_TEAM).then(|| {
+        format!(
+            "this build runs under the production bundle id ({identifier}) but is signed by \
+             '{team}', not Developer-ID team {DEVELOPER_ID_TEAM} — macOS will reset its calendar \
+             access. For local runs use `pnpm tauri:dev` (separate dev identity)."
+        )
+    })
+}
+
 /// Parse the stderr of `codesign -dvvv`. Pure + tested. Ad-hoc / unsigned
 /// binaries (no Authority / TeamIdentifier line) map to clear sentinels so a dev
 /// build is obvious in the logs.
@@ -56,6 +77,11 @@ pub fn log_signing_identity(version: String) {
             info.team,
             info.authority
         );
+        // Loud guard: an ad-hoc/local build under the prod bundle id WILL reset
+        // calendar access (gotcha #5). Surface it (ships via the obs WARN layer).
+        if let Some(warning) = identity_warning(&info.identifier, &info.team) {
+            log::warn!("{warning}");
+        }
         crate::telemetry::record(
             "startup_identity",
             serde_json::json!({
@@ -95,6 +121,17 @@ mod tests {
         assert_eq!(info.identifier, "dev.fforres.entucara");
         assert_eq!(info.team, "adhoc", "an ad-hoc build must be unmistakable in the logs");
         assert_eq!(info.authority, "ad-hoc");
+    }
+
+    #[test]
+    fn identity_warning_fires_only_for_adhoc_under_the_prod_id() {
+        // The real notarized release → no warning.
+        assert_eq!(identity_warning("dev.fforres.entucara", "M4M27973Q7"), None);
+        // Ad-hoc/local build under the PROD id → loud warning (it'll lose access).
+        assert!(identity_warning("dev.fforres.entucara", "adhoc").is_some());
+        assert!(identity_warning("dev.fforres.entucara", "not set").is_some());
+        // A dev build under its OWN id → expected, no warning.
+        assert_eq!(identity_warning("dev.fforres.entucara.dev", "adhoc"), None);
     }
 
     #[test]

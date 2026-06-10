@@ -60,8 +60,11 @@ EventKit failures; `recover_after` flips it healthy after N secs).
    NotDetermined, and the in-app prompt can get wedged (fix: `tccutil reset
    Calendar dev.fforres.entucara`). So: test against the packaged app; expect
    dev runs to churn the prod grant; the startup identity log (identity.rs)
-   makes an identity change visible. The app must SELF-HEAL regardless — see
-   "Calendar access health".
+   makes an identity change visible. PREVENTION: `pnpm tauri:dev` builds under a
+   SEPARATE bundle id (`dev.fforres.entucara.dev`, via tauri.dev.conf.json) so
+   local runs get their own TCC grant and never reset the release's; the
+   startup identity guard warns if an ad-hoc build runs under the prod id. The
+   app must SELF-HEAL regardless — see "Calendar access health".
 6. **Accessory apps won't order-in normal windows** — settings window switches
    activation policy Regular↔Accessory (open_settings / on_window_event).
 7. Timer precision needs `NSActivityLatencyCritical` (windowed ≤120s before
