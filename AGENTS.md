@@ -8,7 +8,9 @@ alert fired.
 ## Commands
 
 ```sh
-pnpm tauri dev          # run (HMR frontend; Rust edits = rebuild+relaunch)
+pnpm tauri:dev          # LOCAL run — uses a separate bundle id (dev.fforres.entucara.dev)
+                        # so it never resets the RELEASE's calendar grant. Prefer this.
+pnpm tauri dev          # raw dev (prod bundle id) — WILL churn the release's TCC grant
 pnpm tauri build        # packaged .app + .dmg (REQUIRED for checkpoint scripts)
 pnpm test && pnpm lint  # vitest + eslint (lefthook also runs oxfmt/oxlint on commit)
 cargo test --manifest-path src-tauri/Cargo.toml
@@ -19,7 +21,13 @@ bash scripts/checkpoints/cp3-auto.sh   # 25s full alarm-lifecycle e2e (see that 
 ## Do NOT
 
 - Run checkpoint scripts or `pkill "En Tu Cara"` while the user relies on alerts.
-- Change bundle id `dev.fforres.entucara` (calendar permission is TCC-keyed to it).
+- Change the release bundle id `dev.fforres.entucara` OR rotate the Developer-ID
+  signing cert — calendar (TCC) permission is keyed to the bundle id + the signing
+  identity. CI signs every release with the SAME Developer-ID team (M4M27973Q7) +
+  notarizes, so the grant survives auto-updates; a different identity under the
+  same id RESETS it. Local/ad-hoc builds must use the dev bundle id
+  (`pnpm tauri:dev`); the startup identity guard (identity.rs) warns if an
+  ad-hoc build runs under the prod id. See src-tauri/AGENTS.md gotcha #5.
 - Bump `tauri-nspanel` (git-rev pinned) or `eventkit-rs` (=exact) without reading
   the load-bearing constraints in PLAN.md.
 - Trust `screencapture` or CGWindowList for overlay verification — both lie

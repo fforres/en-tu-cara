@@ -1,6 +1,6 @@
 [package]
 name = "en-tu-cara"
-version = "0.6.0"
+version = "0.7.0"
 description = "Unmissable meeting alerts for macOS. Fully local."
 authors = ["fforres"]
 edition = "2021"
@@ -22,6 +22,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 log = "0.4"
+# Logging backbone: ONE tracing subscriber fanning out to a rolling local file
+# (always on) + a PostHog-event layer for WARN+ (ships via the telemetry worker,
+# gated by the opt-out). `tracing-subscriber`'s default `tracing-log` feature
+# bridges every existing `log::` call into tracing, so no call sites change.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["fmt", "registry"] }
+tracing-appender = "0.2"
 # Telemetry → PostHog (anonymized, opt-out): a tiny JSON POST to the capture API
 # on a dedicated thread behind a drop-on-full queue (see telemetry.rs). ureq is a
 # blocking, pure-Rust-TLS client — no tokio/reqwest weight, no OpenSSL system dep.
@@ -52,5 +59,3 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 # Native notification on self-update (so a deploy is visibly confirmed).
 tauri-plugin-notification = "2"
-# File logging into the Skyward data dir (~/.config/skyward/en-tu-cara/logs).
-tauri-plugin-log = "2"

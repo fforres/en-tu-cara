@@ -4,6 +4,15 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 const invokeMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
 
+// Event bus mock (mirrors OverlayAlert.test.tsx): capture listeners so a test can
+// emit `access-state-changed`.
+const listeners = vi.hoisted(() => new Map<string, (e: { payload: unknown }) => void>());
+const listenMock = vi.hoisted(() => (name: string, cb: (e: { payload: unknown }) => void) => {
+  listeners.set(name, cb);
+  return Promise.resolve(() => listeners.delete(name));
+});
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
+
 import { SettingsWindow } from "./SettingsWindow";
 import type { Settings } from "./registry";
 
@@ -40,6 +49,7 @@ const CALENDARS = [
 ];
 
 beforeEach(() => {
+  listeners.clear();
   invokeMock.mockReset();
   invokeMock.mockImplementation((cmd: string) => {
     if (cmd === "get_settings") {
@@ -130,6 +140,45 @@ describe("SettingsWindow", () => {
     // Confirmation shown and the textarea is cleared for the next note.
     expect(await screen.findByText(/Thanks/)).toBeInTheDocument();
     expect(screen.getByLabelText("Your suggestion")).toHaveValue("");
+  });
+
+  it("shows the calendar-access-lost banner (pulled on mount) and Grant re-requests access", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_settings") {
+        return Promise.resolve({ ...DEFAULTS });
+      }
+      if (cmd === "calendar_authorization_status") {
+        return Promise.resolve("NotDetermined");
+      }
+      if (cmd === "list_calendars") {
+        return Promise.resolve([]);
+      }
+      if (cmd === "list_system_sounds") {
+        return Promise.resolve(["Sosumi"]);
+      }
+      if (cmd === "get_access_state") {
+        return Promise.resolve({ state: "lost" });
+      }
+      return Promise.resolve(undefined);
+    });
+    await renderSettings();
+    expect(await screen.findByRole("alert")).toHaveTextContent(/alerts are paused/i);
+    fireEvent.click(screen.getByRole("button", { name: "Grant calendar access" }));
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some((c: unknown[]) => c[0] === "request_calendar_access")).toBe(
+        true,
+      ),
+    );
+    // A live recovery edge clears the banner.
+    listeners.get("access-state-changed")?.({ payload: { state: "ok" } });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("raises the banner on a live access-state-changed:lost edge", async () => {
+    await renderSettings(); // default get_access_state → undefined → healthy
+    expect(screen.queryByRole("alert")).toBeNull();
+    listeners.get("access-state-changed")?.({ payload: { state: "lost" } });
+    expect(await screen.findByRole("alert")).toHaveTextContent(/alerts are paused/i);
   });
 
   it("clears a stale error banner once a later save succeeds", async () => {

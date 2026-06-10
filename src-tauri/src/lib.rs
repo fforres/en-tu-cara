@@ -1,7 +1,10 @@
 //! En Tu Cara — unmissable meeting alerts for macOS. Fully local (EventKit only).
 //! Architecture: see PLAN.md.
 
+mod access;
 mod alarm_core;
+mod identity;
+mod obs;
 #[cfg(target_os = "macos")]
 mod calendar;
 #[cfg(target_os = "macos")]
@@ -54,6 +57,11 @@ pub fn run() {
     // Skyward data dir (~/.config/skyward/en-tu-cara) for logs + exports.
     paths::ensure();
 
+    // Observability backbone FIRST, so even early startup logs are captured. One
+    // tracing subscriber → rolling local file (always) + WARN+ PostHog events
+    // (gated by the opt-out). Bridges existing `log::` calls (see obs.rs).
+    obs::init(log_level_from_env());
+
     // eventkit-rs / objc2-event-kit PANIC (rather than error) when an EventKit
     // call returns NULL — which happens whenever the process has no calendar
     // access (notably a bare `tauri dev` binary, whose TCC grant is keyed to the
@@ -90,20 +98,6 @@ pub fn run() {
     }));
 
     tauri::Builder::default()
-        .plugin(
-            tauri_plugin_log::Builder::new()
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Folder {
-                        path: paths::logs_dir(),
-                        file_name: Some("en-tu-cara".to_string()),
-                    },
-                ))
-                .target(tauri_plugin_log::Target::new(
-                    tauri_plugin_log::TargetKind::Stdout,
-                ))
-                .level(log_level_from_env())
-                .build(),
-        )
         .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             // Second launch → open settings on the already-running instance.
             let _ = tray::open_settings(app.clone());
@@ -130,6 +124,7 @@ pub fn run() {
             overlay::close_overlays,
             scheduler::inject_events,
             scheduler::get_active_alarms,
+            scheduler::get_access_state,
             scheduler::demo_alert,
             scheduler::snooze_alarm,
             scheduler::dismiss_alarms,
@@ -152,6 +147,7 @@ pub fn run() {
             settings::list_system_sounds,
             telemetry::telemetry_config,
             telemetry::submit_feedback,
+            paths::export_logs,
         ])
         .setup(|app| {
             log::info!(
@@ -240,6 +236,24 @@ pub fn run() {
             // ticks' events are captured. The worker runs on its own thread behind
             // a drop-on-full queue and can never stall an alarm (see telemetry.rs).
             telemetry::start(app.handle(), &settings_store.get());
+            // Gate log shipping (PostHog events + OTLP logs) on the same opt-out,
+            // and stamp the OTLP resource. Local file logging stays on regardless.
+            {
+                let s = settings_store.get();
+                obs::configure_shipping(
+                    telemetry::is_enabled(s.telemetry_enabled),
+                    s.device_id.clone(),
+                    app.package_info().version.to_string(),
+                );
+            }
+            // Log the running code-signing identity — an identity change vs the
+            // TCC-granted one is THE root cause of the silent lost-access bug, so
+            // make it visible in every log. Off-thread (shells codesign).
+            #[cfg(target_os = "macos")]
+            identity::log_signing_identity(
+                app.package_info().version.to_string(),
+                app.config().identifier.clone(),
+            );
 
             app.manage(settings_store);
             #[cfg(target_os = "macos")]

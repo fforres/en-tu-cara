@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   elapsedFraction,
@@ -280,6 +281,10 @@ export function TrayPopover() {
   const [now, setNow] = useState(() => new Date());
   const [todayOnly, setTodayOnly] = useState(false);
   const [paused, setPaused] = useState(false);
+  // Calendar-access health. When lost, the list keeps showing the last-known
+  // events (preserve-on-failure, see refresh) but with a banner warning they may
+  // be outdated — consistent with the menu-bar ⚠️ and the Settings banner.
+  const [accessLost, setAccessLost] = useState(false);
   const [ignored, setIgnored] = useState<Set<string>>(new Set());
   // Mirror of `ignored` so toggleIgnore decides direction from CURRENT state
   // (not a stale closure) without depending on `ignored` — a fast click can't
@@ -423,6 +428,22 @@ export function TrayPopover() {
       window.removeEventListener("blur", close);
     };
   }, [menu]);
+
+  // Calendar-access health banner: same signal as the menu-bar ⚠️ and the
+  // Settings banner (emitted by the scheduler's access machine). Pull on mount +
+  // listen for live edges. The event list itself is preserved-on-failure (see
+  // refresh), so when lost we still show the last-known events under the banner.
+  useEffect(() => {
+    invoke<{ state: string }>("get_access_state")
+      .then((s) => setAccessLost(s?.state === "lost"))
+      .catch(() => {});
+    const unlisten = listen<{ state: string }>("access-state-changed", (e) => {
+      setAccessLost(e.payload.state === "lost");
+    });
+    return () => {
+      void unlisten.then((f) => f());
+    };
+  }, []);
 
   useEffect(() => {
     // The popover is the always-loaded host window; it's hidden ~99% of the
@@ -568,6 +589,21 @@ export function TrayPopover() {
           </button>
         </span>
       </header>
+
+      {accessLost && (
+        <div
+          role="alert"
+          style={{
+            padding: "6px 12px",
+            fontSize: 11,
+            background: "color-mix(in srgb, crimson 16%, Canvas)",
+            color: "CanvasText",
+            borderBottom: css.hairline,
+          }}
+        >
+          ⚠️ Calendar access lost — these events may be outdated. Open Settings to fix.
+        </div>
+      )}
 
       {paused && (
         <div

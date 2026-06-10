@@ -23,9 +23,10 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Public, write-only PostHog project token (safe to embed; see module docs).
-const POSTHOG_KEY: &str = "phc_L2ELKHRyIWk4Ql8tQ01dude2RalWeJF1lgBF79SBqMY";
+/// `pub(crate)` so the obs OTLP-logs layer reuses the same key.
+pub(crate) const POSTHOG_KEY: &str = "phc_L2ELKHRyIWk4Ql8tQ01dude2RalWeJF1lgBF79SBqMY";
 /// US-cloud ingest host (project 16058 lives on US).
-const POSTHOG_HOST: &str = "https://us.i.posthog.com";
+pub(crate) const POSTHOG_HOST: &str = "https://us.i.posthog.com";
 
 /// Bounded queue depth. Sized so a transient network stall buffers a little, but
 /// a sustained one drops rather than growing memory — we'd rather lose telemetry
@@ -185,18 +186,6 @@ pub fn record(event: &str, props: Value) {
         }
         Err(TrySendError::Disconnected(_)) => {}
     }
-}
-
-/// Forward a Rust log line as a `rust_log` event. Phase-1 "logs from Rust": we
-/// emit this at the operationally meaningful warn/error sites (overlay-show
-/// failure, calendar-sync failure, panics) rather than bridging the whole `log`
-/// facade — tauri-plugin-log already owns the global logger, and the full log
-/// stream is the job of the phase-2 OTLP pipeline. Never sends user content.
-pub fn log_event(level: &str, target: &str, message: impl Into<String>) {
-    record(
-        "rust_log",
-        json!({ "level": level, "target": target, "message": message.into() }),
-    );
 }
 
 /// The worker: owns the only network code. Batches events and flushes on size or
@@ -391,7 +380,6 @@ mod tests {
     fn record_is_a_noop_when_uninitialized() {
         // SINK is unset in the unit-test process: record must not panic or block.
         record("never_sent", json!({"a": 1}));
-        log_event("warn", "test", "no sink, no crash");
     }
 
     #[test]
