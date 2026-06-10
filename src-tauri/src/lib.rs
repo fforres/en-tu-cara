@@ -250,7 +250,10 @@ pub fn run() {
             // TCC-granted one is THE root cause of the silent lost-access bug, so
             // make it visible in every log. Off-thread (shells codesign).
             #[cfg(target_os = "macos")]
-            identity::log_signing_identity(app.package_info().version.to_string());
+            identity::log_signing_identity(
+                app.package_info().version.to_string(),
+                app.config().identifier.clone(),
+            );
 
             app.manage(settings_store);
             #[cfg(target_os = "macos")]

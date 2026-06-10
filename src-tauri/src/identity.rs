@@ -56,8 +56,12 @@ pub fn parse_codesign_output(text: &str) -> SigningInfo {
 /// `codesign` can take tens of ms and must never touch the main/alarm path
 /// (same shell-out discipline as `sw_vers`/`pmset`). The local log keeps the full
 /// authority; telemetry ships only the bundle id + team (no developer name).
+/// `bundle_id` is the Tauri-configured identifier (= the Info.plist
+/// CFBundleIdentifier TCC keys on, and what the `--config` dev override changes)
+/// — NOT codesign's signing identifier, which for an ad-hoc build is
+/// `<binary>-<cdhash>`, unrelated to the bundle id. The guard keys on bundle_id.
 #[cfg(target_os = "macos")]
-pub fn log_signing_identity(version: String) {
+pub fn log_signing_identity(version: String, bundle_id: String) {
     std::thread::spawn(move || {
         let Ok(exe) = std::env::current_exe() else {
             return;
@@ -72,21 +76,21 @@ pub fn log_signing_identity(version: String) {
         };
         let info = parse_codesign_output(&String::from_utf8_lossy(&output.stderr));
         log::info!(
-            "startup identity: v{version} id={} team={} authority={:?}",
+            "startup identity: v{version} bundle_id={bundle_id} codesign_id={} team={} authority={:?}",
             info.identifier,
             info.team,
             info.authority
         );
         // Loud guard: an ad-hoc/local build under the prod bundle id WILL reset
         // calendar access (gotcha #5). Surface it (ships via the obs WARN layer).
-        if let Some(warning) = identity_warning(&info.identifier, &info.team) {
+        if let Some(warning) = identity_warning(&bundle_id, &info.team) {
             log::warn!("{warning}");
         }
         crate::telemetry::record(
             "startup_identity",
             serde_json::json!({
                 "version": version,
-                "signing_id": info.identifier,
+                "bundle_id": bundle_id,
                 "signing_team": info.team,
             }),
         );
