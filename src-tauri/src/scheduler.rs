@@ -117,6 +117,11 @@ static ACCESS_TRACKER: Mutex<crate::access::AccessTracker> =
 /// alerts down" proxy reported on recovery.
 static ACCESS_DOWN_TICKS: Mutex<u32> = Mutex::new(0);
 
+/// Escalation tracker for the poisoned-grant state (authorized but reads
+/// persistently fail) — fires the TCC grant repair once per loss episode.
+static GRANT_REPAIR: Mutex<crate::access::GrantRepairTracker> =
+    Mutex::new(crate::access::GrantRepairTracker::new());
+
 /// Decide whether a per-tick event count warrants an INFO line. We log only on
 /// the EDGE (had events → 0, or 0 → had events), never every tick: the steady
 /// state is silent, but "my calendar went empty" / "events came back" — the
@@ -148,10 +153,17 @@ pub fn get_active_alarms() -> Vec<serde_json::Value> {
 
 /// Current calendar-access health, for the Settings banner to read on mount (it
 /// also listens for live `access-state-changed` events). `None`/`Ok` → "ok".
+/// `reason` (only meaningful when lost) lets the banners differentiate a
+/// revoked grant (user must re-grant) from reads failing despite a grant (ours
+/// to repair) — matching the live event's payload shape.
 #[tauri::command]
 pub fn get_access_state() -> serde_json::Value {
-    let lost = lock_resilient(&ACCESS_TRACKER).announced() == crate::access::AccessState::Lost;
-    serde_json::json!({ "state": if lost { "lost" } else { "ok" } })
+    let tracker = lock_resilient(&ACCESS_TRACKER);
+    let lost = tracker.announced() == crate::access::AccessState::Lost;
+    serde_json::json!({
+        "state": if lost { "lost" } else { "ok" },
+        "reason": tracker.announced_reason(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -352,6 +364,18 @@ fn check_calendar_access(
     let edge = lock_resilient(&ACCESS_TRACKER).observe(raw, reason);
     if let Some(edge) = edge {
         on_access_edge(app, &edge);
+    }
+    // Escalation: per-tick store rebuilds (above) fix a stale store; when N
+    // consecutive REBUILT stores still read nothing despite FullAccess, the TCC
+    // record itself is unusable (the 2026-06-10 poisoned-grant incident) —
+    // destroy + re-grant it. Fires once per loss episode; all rails (test mode,
+    // cooldown, identity guard) live in attempt_grant_repair.
+    if lock_resilient(&GRANT_REPAIR).observe(raw, reason) {
+        log::warn!(
+            "calendar grant appears unusable (authorized, but reads kept failing through \
+             store rebuilds) — attempting automatic TCC grant repair"
+        );
+        crate::calendar::attempt_grant_repair(app, "auto");
     }
 }
 

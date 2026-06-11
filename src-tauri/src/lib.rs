@@ -118,6 +118,7 @@ pub fn run() {
             testmode::get_fired_log,
             calendar::calendar_authorization_status,
             calendar::request_calendar_access,
+            calendar::repair_calendar_access,
             calendar::list_calendars,
             calendar::fetch_events,
             overlay::spike_show_overlays,

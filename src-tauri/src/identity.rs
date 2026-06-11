@@ -36,6 +36,30 @@ fn identity_warning(identifier: &str, team: &str) -> Option<String> {
     })
 }
 
+/// Is it SAFE for this running build to destroy + recreate the TCC record for
+/// `bundle_id` (the grant-repair self-heal in calendar.rs)? Unsafe = an
+/// ad-hoc/local build running under the PRODUCTION bundle id (gotcha #5): a
+/// repair from it would nuke the release's grant — the exact disaster the dev
+/// bundle id exists to prevent. Returns Some(reason) when repair must be
+/// skipped. "Can't verify" also blocks: a destructive self-heal needs positive
+/// proof it's the real release (or a dev build under its own id), not a guess.
+/// Shells `codesign` (tens of ms) — call off the main/alarm path only.
+pub fn grant_repair_blocker(bundle_id: &str) -> Option<String> {
+    if bundle_id != PROD_IDENTIFIER {
+        return None; // dev/test ids own their grant — always safe to repair.
+    }
+    let Ok(exe) = std::env::current_exe() else {
+        return Some("could not resolve the running executable".into());
+    };
+    let output =
+        std::process::Command::new("codesign").args(["-dvvv", "--verbose=4"]).arg(&exe).output();
+    let Ok(output) = output else {
+        return Some("codesign could not inspect the running binary".into());
+    };
+    let info = parse_codesign_output(&String::from_utf8_lossy(&output.stderr));
+    identity_warning(bundle_id, &info.team)
+}
+
 /// Parse the stderr of `codesign -dvvv`. Pure + tested. Ad-hoc / unsigned
 /// binaries (no Authority / TeamIdentifier line) map to clear sentinels so a dev
 /// build is obvious in the logs.

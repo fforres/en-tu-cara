@@ -284,7 +284,11 @@ export function TrayPopover() {
   // Calendar-access health. When lost, the list keeps showing the last-known
   // events (preserve-on-failure, see refresh) but with a banner warning they may
   // be outdated — consistent with the menu-bar ⚠️ and the Settings banner.
+  // `accessReason` picks the copy: a revoked grant (user must re-grant) vs reads
+  // failing despite a grant (self-repairs; the events shown are a stale
+  // snapshot, not gone).
   const [accessLost, setAccessLost] = useState(false);
+  const [accessReason, setAccessReason] = useState("");
   const [ignored, setIgnored] = useState<Set<string>>(new Set());
   // Mirror of `ignored` so toggleIgnore decides direction from CURRENT state
   // (not a stale closure) without depending on `ignored` — a fast click can't
@@ -434,11 +438,15 @@ export function TrayPopover() {
   // listen for live edges. The event list itself is preserved-on-failure (see
   // refresh), so when lost we still show the last-known events under the banner.
   useEffect(() => {
-    invoke<{ state: string }>("get_access_state")
-      .then((s) => setAccessLost(s?.state === "lost"))
+    invoke<{ state: string; reason?: string }>("get_access_state")
+      .then((s) => {
+        setAccessLost(s?.state === "lost");
+        setAccessReason(s?.reason ?? "");
+      })
       .catch(() => {});
-    const unlisten = listen<{ state: string }>("access-state-changed", (e) => {
+    const unlisten = listen<{ state: string; reason?: string }>("access-state-changed", (e) => {
       setAccessLost(e.payload.state === "lost");
+      setAccessReason(e.payload.reason ?? "");
     });
     return () => {
       void unlisten.then((f) => f());
@@ -601,7 +609,9 @@ export function TrayPopover() {
             borderBottom: css.hairline,
           }}
         >
-          ⚠️ Calendar access lost — these events may be outdated. Open Settings to fix.
+          {accessReason === "fetch_failed_despite_authorized"
+            ? "⚠️ Calendar stopped responding — showing last-known events (may be stale). Repairing automatically; open Settings if it persists."
+            : "⚠️ Calendar access lost — these events may be outdated. Open Settings to fix."}
         </div>
       )}
 

@@ -55,9 +55,7 @@ pub enum AccessEdge {
 pub fn classify(auth: AuthKind, fetch: FetchOutcome) -> (AccessState, &'static str) {
     match (auth, fetch) {
         (AuthKind::FullAccess, FetchOutcome::Ok) => (AccessState::Ok, ""),
-        (AuthKind::FullAccess, FetchOutcome::Failed) => {
-            (AccessState::Lost, "fetch_failed_despite_authorized")
-        }
+        (AuthKind::FullAccess, FetchOutcome::Failed) => (AccessState::Lost, REASON_FETCH_FAILED),
         (AuthKind::NotDetermined, _) => (AccessState::Lost, "authorization_not_determined"),
         (AuthKind::DeniedOrRestricted, _) => (AccessState::Lost, "authorization_denied"),
     }
@@ -78,6 +76,7 @@ const CONFIRM_TICKS: u32 = 2;
 pub struct AccessTracker {
     announced: AccessState,
     streak: u32,
+    announced_reason: &'static str,
 }
 
 impl AccessTracker {
@@ -85,12 +84,19 @@ impl AccessTracker {
     /// without access takes `CONFIRM_TICKS` readings to announce (a brief delay,
     /// not a missed alert).
     pub const fn new() -> Self {
-        Self { announced: AccessState::Ok, streak: 0 }
+        Self { announced: AccessState::Ok, streak: 0, announced_reason: "" }
     }
 
     /// The currently-surfaced state (what the badge/banner reflect).
     pub fn announced(&self) -> AccessState {
         self.announced
+    }
+
+    /// The reason tag of the announced Lost state ("" when announced-Ok). Lets
+    /// the banners say the RIGHT thing: a revoked grant needs the user to
+    /// re-grant; reads failing despite a grant is ours to repair.
+    pub fn announced_reason(&self) -> &'static str {
+        self.announced_reason
     }
 
     /// Feed one raw reading; returns `Some(edge)` only when the announced state
@@ -107,13 +113,85 @@ impl AccessTracker {
         self.announced = raw;
         self.streak = 0;
         Some(match raw {
-            AccessState::Lost => AccessEdge::Lost { reason },
-            AccessState::Ok => AccessEdge::Restored,
+            AccessState::Lost => {
+                self.announced_reason = reason;
+                AccessEdge::Lost { reason }
+            }
+            AccessState::Ok => {
+                self.announced_reason = "";
+                AccessEdge::Restored
+            }
         })
     }
 }
 
 impl Default for AccessTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The reason tag for the one loss mode the per-tick store rebuild can't fix.
+pub const REASON_FETCH_FAILED: &str = "fetch_failed_despite_authorized";
+
+/// Consecutive `FullAccess + Failed` readings before we conclude the TCC grant
+/// itself is unusable. Every Lost reading already rebuilds the event store, so
+/// by N consecutive failures we have N fresh stores that ALL returned nothing —
+/// that's not a stale-store blip (fixed by 1 rebuild) and not sleep/wake (fixed
+/// by the next tick). 6 ticks ≈ ≤3 min: long enough to never false-positive on
+/// a transient, short enough that alerts aren't dead for a whole meeting slot.
+const REPAIR_TICKS: u32 = 6;
+
+/// Escalation tracker for the poisoned-grant incident (2026-06-10): macOS held
+/// a legacy-level Calendar record (TCC authValue=2) that calaccessd, wanting
+/// the modern full-access level (4), refused to honor — `authorization_status`
+/// said FullAccess while every read returned nothing, forever, across process
+/// restarts and re-grants. No store rebuild can fix that; the only cure is
+/// destroying the record (`tccutil reset Calendar <bundle id>`) and re-granting
+/// fresh. This pure tracker decides WHEN that repair is warranted: persistent
+/// `fetch_failed_despite_authorized` readings, once per loss episode (re-arms
+/// only after a healthy reading, so a repair that doesn't take can't loop).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrantRepairTracker {
+    consecutive: u32,
+    fired: bool,
+}
+
+impl GrantRepairTracker {
+    pub const fn new() -> Self {
+        Self { consecutive: 0, fired: false }
+    }
+
+    /// Feed one raw reading; returns true exactly once per loss episode, when
+    /// `REPAIR_TICKS` consecutive readings say "authorized but reads fail".
+    /// Other Lost reasons (NotDetermined/Denied) have their own recovery flows
+    /// (re-prompt / System Settings deep-link) — they reset the streak but NOT
+    /// the fired latch, so the post-repair NotDetermined phase can't re-arm it.
+    pub fn observe(&mut self, raw: AccessState, reason: &str) -> bool {
+        match (raw, reason) {
+            (AccessState::Ok, _) => {
+                self.consecutive = 0;
+                self.fired = false;
+                false
+            }
+            (AccessState::Lost, REASON_FETCH_FAILED) => {
+                self.consecutive += 1;
+                if !self.fired && self.consecutive >= REPAIR_TICKS {
+                    self.fired = true;
+                    true
+                } else {
+                    false
+                }
+            }
+            (AccessState::Lost, _) => {
+                self.consecutive = 0;
+                false
+            }
+        }
+    }
+}
+
+impl Default for GrantRepairTracker {
     fn default() -> Self {
         Self::new()
     }
@@ -240,5 +318,62 @@ mod tests {
         assert_eq!(t.announced(), AccessState::Ok, "not yet confirmed");
         t.observe(AccessState::Lost, "x");
         assert_eq!(t.announced(), AccessState::Lost, "confirmed after 2");
+    }
+
+    #[test]
+    fn announced_reason_tracks_the_confirmed_loss_and_clears_on_recovery() {
+        // The banners branch on this: revoked grant → "grant access" CTA;
+        // reads-failing-despite-grant → "repairing" copy. It must reflect the
+        // CONFIRMED state only, and clear when healthy again.
+        let mut t = AccessTracker::new();
+        assert_eq!(t.announced_reason(), "");
+        t.observe(AccessState::Lost, REASON_FETCH_FAILED);
+        assert_eq!(t.announced_reason(), "", "unconfirmed loss must not leak a reason");
+        t.observe(AccessState::Lost, REASON_FETCH_FAILED);
+        assert_eq!(t.announced_reason(), REASON_FETCH_FAILED);
+        t.observe(AccessState::Ok, "");
+        t.observe(AccessState::Ok, "");
+        assert_eq!(t.announced_reason(), "", "recovery clears the reason");
+    }
+
+    // --- GrantRepairTracker (the poisoned-grant escalation) -----------------
+
+    fn lost_fetch(t: &mut GrantRepairTracker, n: u32) -> bool {
+        (0..n).map(|_| t.observe(AccessState::Lost, REASON_FETCH_FAILED)).any(|f| f)
+    }
+
+    #[test]
+    fn repair_fires_once_after_persistent_authorized_failures() {
+        let mut t = GrantRepairTracker::new();
+        assert!(!lost_fetch(&mut t, 5), "below threshold — store rebuilds may still fix it");
+        assert!(t.observe(AccessState::Lost, REASON_FETCH_FAILED), "6th consecutive fires");
+        assert!(!lost_fetch(&mut t, 20), "fired latch: never again within the episode");
+    }
+
+    #[test]
+    fn a_single_healthy_reading_resets_the_streak_and_rearms() {
+        let mut t = GrantRepairTracker::new();
+        lost_fetch(&mut t, 5);
+        t.observe(AccessState::Ok, "");
+        assert!(!lost_fetch(&mut t, 5), "streak restarted after recovery");
+        assert!(t.observe(AccessState::Lost, REASON_FETCH_FAILED), "re-armed: a NEW episode fires");
+    }
+
+    #[test]
+    fn other_loss_reasons_never_trigger_repair_nor_rearm_it() {
+        // NotDetermined/Denied have their own flows (re-prompt / System
+        // Settings); resetting TCC on them would be destructive. And after a
+        // repair fires, the grant goes NotDetermined while the user is prompted
+        // — that phase must not re-arm the latch.
+        let mut t = GrantRepairTracker::new();
+        for _ in 0..20 {
+            assert!(!t.observe(AccessState::Lost, "authorization_not_determined"));
+        }
+        assert!(!lost_fetch(&mut t, 5), "not_determined readings reset the fetch-failed streak");
+        assert!(t.observe(AccessState::Lost, REASON_FETCH_FAILED));
+        // Post-repair: NotDetermined while prompting, then fetch-failures again
+        // (say the user dismissed the prompt) — still latched, no second reset.
+        t.observe(AccessState::Lost, "authorization_not_determined");
+        assert!(!lost_fetch(&mut t, 10), "latch survives the NotDetermined phase");
     }
 }

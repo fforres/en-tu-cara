@@ -525,7 +525,12 @@ export function SettingsWindow() {
   // `access-state-changed` on the Ok↔Lost edge; we also pull on mount in case
   // the window opened AFTER the transition (the overlay's pull-and-listen
   // pattern). This is the loud, in-app half of "never silently stop alerting."
+  // `accessReason` differentiates the two loss modes (they need different CTAs):
+  // a revoked grant → the user must re-grant; reads failing DESPITE a grant
+  // (the poisoned-TCC-record incident) → the app repairs itself, with a manual
+  // "Repair" escape hatch.
   const [accessLost, setAccessLost] = useState(false);
+  const [accessReason, setAccessReason] = useState("");
   // Mirror of `settings` so `update` can merge patches without a stale closure
   // and WITHOUT calling invoke inside a setState updater (which StrictMode runs
   // twice → double set_settings).
@@ -550,6 +555,13 @@ export function SettingsWindow() {
       .finally(refreshCalendars);
   }, [refreshCalendars]);
 
+  // Manual entry to the TCC grant repair (reset + fresh prompt) for the
+  // "granted but reads fail" loss mode. Fire-and-forget: the Rust side does
+  // everything off-thread and the access banner reflects the outcome live.
+  const onRepairCalendar = useCallback(() => {
+    invoke("repair_calendar_access").catch((e) => setError(String(e)));
+  }, []);
+
   useEffect(() => {
     invoke<Settings>("get_settings")
       .then(setSettings)
@@ -565,11 +577,15 @@ export function SettingsWindow() {
 
   // Calendar-access banner: pull current state on mount + listen for live edges.
   useEffect(() => {
-    invoke<{ state: string }>("get_access_state")
-      .then((s) => setAccessLost(s?.state === "lost"))
+    invoke<{ state: string; reason?: string }>("get_access_state")
+      .then((s) => {
+        setAccessLost(s?.state === "lost");
+        setAccessReason(s?.reason ?? "");
+      })
       .catch(() => {});
-    const unlisten = listen<{ state: string }>("access-state-changed", (e) => {
+    const unlisten = listen<{ state: string; reason?: string }>("access-state-changed", (e) => {
       setAccessLost(e.payload.state === "lost");
+      setAccessReason(e.payload.reason ?? "");
       if (e.payload.state === "ok") {
         refreshCalendars();
       }
@@ -710,16 +726,45 @@ export function SettingsWindow() {
               border: "1px solid color-mix(in srgb, crimson 45%, transparent)",
             }}
           >
-            <span style={{ fontSize: 13, flex: 1 }}>
-              ⚠️ <strong>Calendar access was lost — alerts are paused.</strong> En Tu Cara can't
-              read your calendar, so no meeting alerts will fire until access is restored.
-            </span>
-            <button
-              onClick={onGrantCalendar}
-              style={{ font: "inherit", fontWeight: 600, padding: "5px 12px", cursor: "pointer" }}
-            >
-              Grant calendar access
-            </button>
+            {accessReason === "fetch_failed_despite_authorized" ? (
+              <>
+                <span style={{ fontSize: 13, flex: 1 }}>
+                  ⚠️ <strong>Calendar stopped responding — alerts are paused.</strong> Access is
+                  granted, but macOS is returning no events — the permission record may be
+                  corrupted. En Tu Cara repairs this automatically; repairing shows a fresh access
+                  prompt.
+                </span>
+                <button
+                  onClick={onRepairCalendar}
+                  style={{
+                    font: "inherit",
+                    fontWeight: 600,
+                    padding: "5px 12px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Repair access
+                </button>
+              </>
+            ) : (
+              <>
+                <span style={{ fontSize: 13, flex: 1 }}>
+                  ⚠️ <strong>Calendar access was lost — alerts are paused.</strong> En Tu Cara can't
+                  read your calendar, so no meeting alerts will fire until access is restored.
+                </span>
+                <button
+                  onClick={onGrantCalendar}
+                  style={{
+                    font: "inherit",
+                    fontWeight: 600,
+                    padding: "5px 12px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Grant calendar access
+                </button>
+              </>
+            )}
           </div>
         )}
         {error && <div style={{ color: "crimson", fontSize: 12, marginBottom: 8 }}>{error}</div>}

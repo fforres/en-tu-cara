@@ -328,6 +328,106 @@ pub fn attempt_self_heal(app: &tauri::AppHandle, _reason: &str) {
     }
 }
 
+/// Cooldown marker for the AUTOMATIC grant repair — a FILE (mtime = last run),
+/// not an in-process static, deliberately: a successful repair prompt RELAUNCHES
+/// the app (relaunch-on-grant), so an in-process cooldown resets with it and a
+/// machine where the repair doesn't take (the 2026-06-10 wedge: even fresh
+/// grants die) would loop reset→prompt→relaunch every few minutes. The file
+/// survives restarts; one repair attempt per cooldown per MACHINE, period.
+/// Manual (Settings button) bypasses it — an explicit click.
+fn repair_cooldown_active() -> bool {
+    const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+    std::fs::metadata(crate::paths::data_dir().join("grant-repair-last"))
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|elapsed| elapsed < COOLDOWN)
+}
+
+fn stamp_repair_cooldown() {
+    let _ = crate::paths::atomic_write(&crate::paths::data_dir().join("grant-repair-last"), b"");
+}
+
+/// Destroy + recreate this app's Calendar TCC record — the cure for the
+/// POISONED-GRANT state (incident 2026-06-10): macOS held a legacy-level
+/// Calendar record (TCC authValue=2) that calaccessd, requiring the modern
+/// full-access level (4), refused to honor — `authorization_status` reported
+/// FullAccess while every read returned nothing, ~4.5 min after each launch,
+/// across restarts AND re-grants (tccd: "Staged prompting request is invalid:
+/// currentAuth: 2 desiredAuth: 4"). No store rebuild or re-prompt fixes that;
+/// only `tccutil reset Calendar <bundle id>` + a FRESH grant does.
+///
+/// Trigger paths: "auto" (access::GrantRepairTracker — persistent
+/// fetch-failed-despite-authorized) and "manual" (the Settings banner button).
+/// Safety rails, in order:
+///   1. Never in test mode (the access machine may be driven by
+///      ENTUCARA_TEST_ACCESS, not a real grant).
+///   2. Auto runs at most once per 6h (manual bypasses — an explicit click).
+///   3. identity::grant_repair_blocker — an ad-hoc build under the PROD bundle
+///      id must never destroy the release's grant (gotcha #5).
+///
+/// On success: rebuild the event store and show the fresh full-access prompt
+/// (relaunch-on-grant applies the clean record). Everything off-thread; the
+/// caller (scheduler tick or IPC command) never blocks.
+pub fn attempt_grant_repair(app: &tauri::AppHandle, trigger: &'static str) {
+    if crate::testmode::is_test_mode() {
+        return;
+    }
+    if trigger != "manual" && repair_cooldown_active() {
+        log::info!("grant repair: skipped (cooldown; trigger={trigger})");
+        return;
+    }
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let bundle_id = app.config().identifier.clone();
+        if let Some(blocker) = crate::identity::grant_repair_blocker(&bundle_id) {
+            log::warn!("grant repair: SKIPPED — {blocker}");
+            crate::telemetry::record(
+                "calendar_grant_repair_skipped",
+                serde_json::json!({ "trigger": trigger }),
+            );
+            return;
+        }
+        log::warn!(
+            "grant repair: resetting the Calendar TCC record for {bundle_id} (trigger={trigger}) — \
+             status says FullAccess but reads persistently fail (poisoned record); \
+             a fresh access prompt follows"
+        );
+        // Stamp BEFORE acting (and regardless of outcome): the relaunch-on-grant
+        // wipes this process, so the file is the only thing standing between a
+        // not-taking repair and a prompt loop.
+        stamp_repair_cooldown();
+        let out = std::process::Command::new("tccutil")
+            .args(["reset", "Calendar", &bundle_id])
+            .output();
+        let ok = out.as_ref().is_ok_and(|o| o.status.success());
+        crate::telemetry::record(
+            "calendar_grant_repair",
+            serde_json::json!({ "trigger": trigger, "ok": ok }),
+        );
+        if !ok {
+            let detail = match out {
+                Ok(o) => String::from_utf8_lossy(&o.stderr).trim().to_string(),
+                Err(e) => e.to_string(),
+            };
+            log::warn!("grant repair: tccutil reset failed: {detail}");
+            return;
+        }
+        invalidate_event_store();
+        log::info!("grant repair: TCC record reset — showing the fresh full-access prompt");
+        // Relaunch-on-grant applies the clean record process-wide.
+        prompt_access_off_main(app);
+    });
+}
+
+/// Settings-banner "Repair access" button: the manual entry to the same repair.
+/// Returns immediately (all work is off-thread).
+#[tauri::command]
+pub fn repair_calendar_access(app: tauri::AppHandle) -> Result<(), String> {
+    attempt_grant_repair(&app, "manual");
+    Ok(())
+}
+
 /// Cheap video-link presence check for the alarm policy (only_video_events).
 /// The TS extractor (meeting-links.ts) remains canonical for display/Join.
 pub fn has_meeting_link(url: Option<&str>, location: Option<&str>, notes: Option<&str>) -> bool {
