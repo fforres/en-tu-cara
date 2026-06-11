@@ -17,6 +17,7 @@ import {
 import { searchSettings } from "./fuzzy";
 import { THEMES } from "../overlay/themes";
 import { checkForUpdate, installAndRelaunch } from "../../lib/updater";
+import { REASON_FETCH_FAILED, type AccessStatePayload } from "../../lib/access";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { capture, initTelemetry, setTelemetryEnabled } from "../../telemetry";
 
@@ -89,6 +90,67 @@ type CheckState =
 // check state can use hooks (a switch case can't). __APP_VERSION__ is baked by
 // Vite; the updater commands run here because the settings window holds the
 // updater capability (see capabilities/updater.json, windows: ["*"]).
+// Calendar-access-lost banner. Two loss modes, two CTAs (see lib/access.ts):
+// reads failing DESPITE a grant (poisoned TCC record) → the app repairs itself,
+// with "Repair access" as the manual escape hatch; any other reason → the grant
+// is gone and only the user can re-grant. Conflating them sends the user
+// through a re-prompt that can't fix a corrupted record.
+function AccessBanner({
+  reason,
+  onRepair,
+  onGrant,
+}: {
+  reason: string;
+  onRepair: () => void;
+  onGrant: () => void;
+}) {
+  const repairable = reason === REASON_FETCH_FAILED;
+  const buttonStyle = {
+    font: "inherit",
+    fontWeight: 600,
+    padding: "5px 12px",
+    cursor: "pointer",
+  } as const;
+  return (
+    <div
+      role="alert"
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 12,
+        padding: "10px 12px",
+        marginBottom: 12,
+        borderRadius: 8,
+        background: "color-mix(in srgb, crimson 16%, Canvas)",
+        border: "1px solid color-mix(in srgb, crimson 45%, transparent)",
+      }}
+    >
+      {repairable ? (
+        <>
+          <span style={{ fontSize: 13, flex: 1 }}>
+            ⚠️ <strong>Calendar stopped responding — alerts are paused.</strong> Access is granted,
+            but macOS is returning no events — the permission record may be corrupted. En Tu Cara
+            repairs this automatically; repairing shows a fresh access prompt.
+          </span>
+          <button onClick={onRepair} style={buttonStyle}>
+            Repair access
+          </button>
+        </>
+      ) : (
+        <>
+          <span style={{ fontSize: 13, flex: 1 }}>
+            ⚠️ <strong>Calendar access was lost — alerts are paused.</strong> En Tu Cara can't read
+            your calendar, so no meeting alerts will fire until access is restored.
+          </span>
+          <button onClick={onGrant} style={buttonStyle}>
+            Grant calendar access
+          </button>
+        </>
+      )}
+    </div>
+  );
+}
+
 function VersionControl() {
   const [state, setState] = useState<CheckState>({ kind: "idle" });
 
@@ -577,13 +639,13 @@ export function SettingsWindow() {
 
   // Calendar-access banner: pull current state on mount + listen for live edges.
   useEffect(() => {
-    invoke<{ state: string; reason?: string }>("get_access_state")
+    invoke<AccessStatePayload>("get_access_state")
       .then((s) => {
         setAccessLost(s?.state === "lost");
         setAccessReason(s?.reason ?? "");
       })
       .catch(() => {});
-    const unlisten = listen<{ state: string; reason?: string }>("access-state-changed", (e) => {
+    const unlisten = listen<AccessStatePayload>("access-state-changed", (e) => {
       setAccessLost(e.payload.state === "lost");
       setAccessReason(e.payload.reason ?? "");
       if (e.payload.state === "ok") {
@@ -713,59 +775,11 @@ export function SettingsWindow() {
       {/* Content */}
       <section style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
         {accessLost && (
-          <div
-            role="alert"
-            style={{
-              display: "flex",
-              alignItems: "center",
-              gap: 12,
-              padding: "10px 12px",
-              marginBottom: 12,
-              borderRadius: 8,
-              background: "color-mix(in srgb, crimson 16%, Canvas)",
-              border: "1px solid color-mix(in srgb, crimson 45%, transparent)",
-            }}
-          >
-            {accessReason === "fetch_failed_despite_authorized" ? (
-              <>
-                <span style={{ fontSize: 13, flex: 1 }}>
-                  ⚠️ <strong>Calendar stopped responding — alerts are paused.</strong> Access is
-                  granted, but macOS is returning no events — the permission record may be
-                  corrupted. En Tu Cara repairs this automatically; repairing shows a fresh access
-                  prompt.
-                </span>
-                <button
-                  onClick={onRepairCalendar}
-                  style={{
-                    font: "inherit",
-                    fontWeight: 600,
-                    padding: "5px 12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Repair access
-                </button>
-              </>
-            ) : (
-              <>
-                <span style={{ fontSize: 13, flex: 1 }}>
-                  ⚠️ <strong>Calendar access was lost — alerts are paused.</strong> En Tu Cara can't
-                  read your calendar, so no meeting alerts will fire until access is restored.
-                </span>
-                <button
-                  onClick={onGrantCalendar}
-                  style={{
-                    font: "inherit",
-                    fontWeight: 600,
-                    padding: "5px 12px",
-                    cursor: "pointer",
-                  }}
-                >
-                  Grant calendar access
-                </button>
-              </>
-            )}
-          </div>
+          <AccessBanner
+            reason={accessReason}
+            onRepair={onRepairCalendar}
+            onGrant={onGrantCalendar}
+          />
         )}
         {error && <div style={{ color: "crimson", fontSize: 12, marginBottom: 8 }}>{error}</div>}
         {searching && (

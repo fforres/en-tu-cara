@@ -8,9 +8,15 @@ mod obs;
 #[cfg(target_os = "macos")]
 mod calendar;
 #[cfg(target_os = "macos")]
+mod fire_spike;
+#[cfg(target_os = "macos")]
+mod grant_repair;
+#[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
 mod scheduler;
+#[cfg(target_os = "macos")]
+mod snapshot;
 mod paths;
 mod settings;
 #[cfg(target_os = "macos")]
@@ -118,7 +124,7 @@ pub fn run() {
             testmode::get_fired_log,
             calendar::calendar_authorization_status,
             calendar::request_calendar_access,
-            calendar::repair_calendar_access,
+            grant_repair::repair_calendar_access,
             calendar::list_calendars,
             calendar::fetch_events,
             overlay::spike_show_overlays,
@@ -193,7 +199,7 @@ pub fn run() {
 
             // CP1d spike: ENTUCARA_SPIKE_FIRE="<secs>,<arm>" → fire-latency test.
             #[cfg(target_os = "macos")]
-            scheduler::maybe_run_fire_spike(app.handle());
+            fire_spike::maybe_run_fire_spike(app.handle());
 
             // Visual checks / dev convenience: open the settings window on launch
             // (after the 2s setup-grace — window creation during setup is the

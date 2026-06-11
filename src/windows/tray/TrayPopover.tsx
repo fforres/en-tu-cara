@@ -15,6 +15,7 @@ import {
   remainingLabel,
 } from "../../lib/classify";
 import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
+import { REASON_FETCH_FAILED, type AccessStatePayload } from "../../lib/access";
 
 export interface UiEvent {
   /** EKEvent identifier (event.eventIdentifier) — used for the ical:// deep-link. */
@@ -438,13 +439,13 @@ export function TrayPopover() {
   // listen for live edges. The event list itself is preserved-on-failure (see
   // refresh), so when lost we still show the last-known events under the banner.
   useEffect(() => {
-    invoke<{ state: string; reason?: string }>("get_access_state")
+    invoke<AccessStatePayload>("get_access_state")
       .then((s) => {
         setAccessLost(s?.state === "lost");
         setAccessReason(s?.reason ?? "");
       })
       .catch(() => {});
-    const unlisten = listen<{ state: string; reason?: string }>("access-state-changed", (e) => {
+    const unlisten = listen<AccessStatePayload>("access-state-changed", (e) => {
       setAccessLost(e.payload.state === "lost");
       setAccessReason(e.payload.reason ?? "");
     });
@@ -609,7 +610,7 @@ export function TrayPopover() {
             borderBottom: css.hairline,
           }}
         >
-          {accessReason === "fetch_failed_despite_authorized"
+          {accessReason === REASON_FETCH_FAILED
             ? "⚠️ Calendar stopped responding — showing last-known events (may be stale). Repairing automatically; open Settings if it persists."
             : "⚠️ Calendar access lost — these events may be outdated. Open Settings to fix."}
         </div>

@@ -7,10 +7,7 @@
 //!     `NSActivityLatencyCritical` assertion — `.userInitiated` alone does NOT
 //!     defeat App Nap timer throttling. Held WINDOWED (≤2 min before fire), not 24/7.
 //!
-//! CP1d spike: ENTUCARA_SPIKE_FIRE="<delay_secs>,<arm>" with arm ∈
-//! none | userinitiated | latencycritical. Arms an alarm <delay_secs> out, holds the
-//! requested assertion, fires, and appends a latency record to
-//! ~/Library/Application Support/dev.fforres.entucara/fire-spike.jsonl, then exits.
+//! The CP1d latency-measurement spike lives in fire_spike.rs.
 
 #![cfg(target_os = "macos")]
 
@@ -18,7 +15,6 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-use serde::Serialize;
 use std::time::Duration;
 
 /// RAII holder for an NSProcessInfo activity assertion.
@@ -43,49 +39,6 @@ impl Drop for ActivityAssertion {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct FireSpikeRecord {
-    arm: String,
-    scheduled_for: DateTime<Utc>,
-    fired_at: DateTime<Utc>,
-    latency_ms: i64,
-    delay_secs: i64,
-    on_battery: bool,
-    macos: String,
-}
-
-fn on_battery() -> bool {
-    std::process::Command::new("pmset")
-        .args(["-g", "batt"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Battery Power"))
-        .unwrap_or(false)
-}
-
-fn macos_version() -> String {
-    std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
-/// Wall-clock-targeted wait: short ticks, re-checking the target each time.
-/// Under App Nap the TICKS get stretched — which is exactly the latency we measure.
-/// (Production will also re-arm on NSWorkspace didWake; spike keeps it minimal.)
-fn wait_until(target: DateTime<Utc>) {
-    loop {
-        let now = Utc::now();
-        if now >= target {
-            return;
-        }
-        let remaining = (target - now).num_milliseconds();
-        // Coarse ticks far out, fine ticks close in.
-        let tick = if remaining > 10_000 { 1_000 } else { 50 };
-        std::thread::sleep(Duration::from_millis(tick.min(remaining.max(1)) as u64));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Production loop (Phase 3)
 // ---------------------------------------------------------------------------
@@ -107,20 +60,11 @@ pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new())
 /// transition log below. None = no tick has run yet.
 static LAST_EVENT_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
 
-/// Debounced calendar-access health tracker (announces a transition only after
-/// it's held for a couple ticks — see access::AccessTracker). Only real reads
-/// feed it (test/injected runs never do).
-static ACCESS_TRACKER: Mutex<crate::access::AccessTracker> =
-    Mutex::new(crate::access::AccessTracker::new());
-
-/// Count of consecutive ticks spent in the Lost state — a no-PII "how long were
-/// alerts down" proxy reported on recovery.
-static ACCESS_DOWN_TICKS: Mutex<u32> = Mutex::new(0);
-
-/// Escalation tracker for the poisoned-grant state (authorized but reads
-/// persistently fail) — fires the TCC grant repair once per loss episode.
-static GRANT_REPAIR: Mutex<crate::access::GrantRepairTracker> =
-    Mutex::new(crate::access::GrantRepairTracker::new());
+/// The complete calendar-access health state (debounced announcer + repair
+/// escalation + downtime counter) behind ONE lock — see access::AccessHealth.
+/// Only real reads feed it (test/injected runs never do).
+static ACCESS_HEALTH: Mutex<crate::access::AccessHealth> =
+    Mutex::new(crate::access::AccessHealth::new());
 
 /// Decide whether a per-tick event count warrants an INFO line. We log only on
 /// the EDGE (had events → 0, or 0 → had events), never every tick: the steady
@@ -158,11 +102,11 @@ pub fn get_active_alarms() -> Vec<serde_json::Value> {
 /// to repair) — matching the live event's payload shape.
 #[tauri::command]
 pub fn get_access_state() -> serde_json::Value {
-    let tracker = lock_resilient(&ACCESS_TRACKER);
-    let lost = tracker.announced() == crate::access::AccessState::Lost;
+    let health = lock_resilient(&ACCESS_HEALTH);
+    let lost = health.announced() == crate::access::AccessState::Lost;
     serde_json::json!({
         "state": if lost { "lost" } else { "ok" },
-        "reason": tracker.announced_reason(),
+        "reason": health.announced_reason(),
     })
 }
 
@@ -290,50 +234,11 @@ fn test_access_override() -> Option<(crate::access::AuthKind, crate::access::Fet
     })
 }
 
-/// Last-good event snapshot for the ALARM path — the final line of defense for
-/// the prime directive. The popover has always preserved last-known events on a
-/// failed read; the scheduler did NOT (a failed read fed compute_actions an
-/// empty list), so during an access-loss episode alarms silently starved — on
-/// the 2026-06-10 wedged machine, reads died 4m31s after every launch and every
-/// meeting after that would have fired nothing. Serving the snapshot keeps
-/// alerts armed through the episode, while the access machine (which still sees
-/// the Failed outcome) shouts and repairs in parallel.
-///
-/// TTL = the fetch window's forward reach (2 days): a snapshot can't usefully
-/// promise more than it fetched. The known staleness trade — a meeting
-/// deleted/moved AFTER the snapshot still alerts at its old time — is accepted:
-/// a loud false alarm over a silent miss, and the tray/banner already say
-/// events may be stale. Pure (clock injected) + tested.
-struct SnapshotCache {
-    events: Vec<AlarmEvent>,
-    fetched_at: Option<DateTime<Utc>>,
-}
-
-impl SnapshotCache {
-    const TTL_SECS: i64 = 48 * 3600;
-
-    const fn new() -> Self {
-        Self { events: Vec::new(), fetched_at: None }
-    }
-
-    fn store(&mut self, events: &[AlarmEvent], now: DateTime<Utc>) {
-        self.events = events.to_vec();
-        self.fetched_at = Some(now);
-    }
-
-    /// What to serve when the live read failed: `Some((events, age_secs))`
-    /// while a snapshot exists and is fresh enough to trust, else `None`
-    /// (never taken a good read, or the snapshot outlived its window).
-    fn serve(&self, now: DateTime<Utc>) -> Option<(Vec<AlarmEvent>, i64)> {
-        let age = (now - self.fetched_at?).num_seconds();
-        (age <= Self::TTL_SECS).then(|| (self.events.clone(), age))
-    }
-}
-
-static SNAPSHOT: Mutex<SnapshotCache> = Mutex::new(SnapshotCache::new());
-
-/// Edge latch so "serving from snapshot" logs once per episode, not per tick.
-static SERVING_SNAPSHOT: Mutex<bool> = Mutex::new(false);
+/// Last-good event snapshot for the ALARM path (see snapshot.rs — the final
+/// line of defense for the prime directive: alarms must not starve when reads
+/// fail). The cache owns its own once-per-episode log edges.
+static SNAPSHOT: Mutex<crate::snapshot::SnapshotCache> =
+    Mutex::new(crate::snapshot::SnapshotCache::new());
 
 fn upcoming_alarm_events(
     settings: &crate::settings::Settings,
@@ -375,8 +280,7 @@ fn upcoming_alarm_events(
                     })
                 })
                 .collect();
-            lock_resilient(&SNAPSHOT).store(&parsed, now);
-            if std::mem::replace(&mut *lock_resilient(&SERVING_SNAPSHOT), false) {
+            if lock_resilient(&SNAPSHOT).store(&parsed, now) {
                 log::info!("calendar reads recovered — back to live events (snapshot retired)");
             }
             (parsed, Some(crate::access::FetchOutcome::Ok))
@@ -386,17 +290,17 @@ fn upcoming_alarm_events(
             // loud surfaces + repair. The ALARM path must not starve meanwhile:
             // serve the last good snapshot while it's within its window.
             crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
-            let served = lock_resilient(&SNAPSHOT).serve(now);
-            let events = match served {
-                Some((events, age_secs)) => {
-                    if !std::mem::replace(&mut *lock_resilient(&SERVING_SNAPSHOT), true) {
+            let events = match lock_resilient(&SNAPSHOT).serve(now) {
+                Some(stale) => {
+                    if stale.first {
                         log::warn!(
                             "calendar read failed — serving {} event(s) from the last good \
-                             snapshot ({age_secs}s old); alerts stay armed while access heals",
-                            events.len()
+                             snapshot ({}s old); alerts stay armed while access heals",
+                            stale.events.len(),
+                            stale.age_secs
                         );
                     }
-                    events
+                    stale.events
                 }
                 None => Vec::new(),
             };
@@ -413,33 +317,28 @@ fn check_calendar_access(
     auth: crate::access::AuthKind,
     fetch: crate::access::FetchOutcome,
 ) {
-    let (raw, reason) = crate::access::classify(auth, fetch);
+    let obs = lock_resilient(&ACCESS_HEALTH).observe(auth, fetch);
     // Self-heal BEFORE the debounce announces: on any failing read, force a fresh
     // event store for the next tick. If a stale store was all it was, the next
     // read succeeds and the debounce never announces — recovery is silent (no
     // useless "lost"/"Grant access" notification for an already-valid grant).
-    match raw {
-        crate::access::AccessState::Lost => {
-            crate::calendar::invalidate_event_store();
-            *lock_resilient(&ACCESS_DOWN_TICKS) += 1;
-        }
-        crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
+    if obs.raw == crate::access::AccessState::Lost {
+        crate::calendar::invalidate_event_store();
     }
-    let edge = lock_resilient(&ACCESS_TRACKER).observe(raw, reason);
-    if let Some(edge) = edge {
-        on_access_edge(app, &edge);
+    if let Some(edge) = &obs.edge {
+        on_access_edge(app, edge, obs.down_ticks);
     }
     // Escalation: per-tick store rebuilds (above) fix a stale store; when N
     // consecutive REBUILT stores still read nothing despite FullAccess, the TCC
     // record itself is unusable (the 2026-06-10 poisoned-grant incident) —
     // destroy + re-grant it. Fires once per loss episode; all rails (test mode,
-    // cooldown, identity guard) live in attempt_grant_repair.
-    if lock_resilient(&GRANT_REPAIR).observe(raw, reason) {
+    // cooldown, identity guard) live in grant_repair::attempt.
+    if obs.repair_due {
         log::warn!(
             "calendar grant appears unusable (authorized, but reads kept failing through \
              store rebuilds) — attempting automatic TCC grant repair"
         );
-        crate::calendar::attempt_grant_repair(app, "auto");
+        crate::grant_repair::attempt(app, "auto");
     }
 }
 
@@ -447,7 +346,7 @@ fn check_calendar_access(
 /// transition, not every tick). Everything here must be non-blocking — it runs
 /// inside the tick, which must never stall the alarm path; the loud surfaces and
 /// self-heal all dispatch via spawn / run_on_main_thread / try_send.
-fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge) {
+fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge, down_ticks: u32) {
     match edge {
         crate::access::AccessEdge::Lost { reason } => {
             log::warn!("calendar access lost ({reason}) — alerts are paused until it is restored");
@@ -459,9 +358,13 @@ fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge) {
             crate::calendar::attempt_self_heal(app, reason);
         }
         crate::access::AccessEdge::Restored => {
-            let down = *lock_resilient(&ACCESS_DOWN_TICKS);
-            log::info!("calendar access restored — alerts active again (was down {down} tick(s))");
-            crate::telemetry::record("calendar_access_restored", serde_json::json!({ "down_ticks": down }));
+            log::info!(
+                "calendar access restored — alerts active again (was down {down_ticks} tick(s))"
+            );
+            crate::telemetry::record(
+                "calendar_access_restored",
+                serde_json::json!({ "down_ticks": down_ticks }),
+            );
             crate::access::announce_restored(app);
         }
     }
@@ -862,125 +765,9 @@ pub fn get_ignored(app: tauri::AppHandle) -> Vec<String> {
     keys
 }
 
-// ---------------------------------------------------------------------------
-// CP1d spike (kept for latency re-measurement)
-// ---------------------------------------------------------------------------
-
-/// CP1d: ENTUCARA_SPIKE_FIRE="<delay_secs>,<arm>" → measure fire latency, exit app.
-pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
-    let Ok(spec) = std::env::var("ENTUCARA_SPIKE_FIRE") else {
-        return;
-    };
-    let (delay_str, arm) = spec.split_once(',').unwrap_or((spec.as_str(), "none"));
-    let delay_secs: i64 = delay_str.parse().unwrap_or(60);
-    let arm = arm.to_lowercase();
-    let app = app.clone();
-
-    std::thread::spawn(move || {
-        let scheduled_for = Utc::now() + ChronoDuration::seconds(delay_secs);
-
-        // Hold the requested assertion for the whole wait. (Production holds it
-        // windowed ≤2 min before fire; the spike holds it throughout so the arm
-        // under test is unambiguous.)
-        let _assertion = match arm.as_str() {
-            "userinitiated" => Some(ActivityAssertion::begin(
-                NSActivityOptions::UserInitiated,
-                "en-tu-cara fire spike: userInitiated",
-            )),
-            "latencycritical" => Some(ActivityAssertion::begin(
-                NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical,
-                "en-tu-cara fire spike: userInitiated|latencyCritical",
-            )),
-            _ => None,
-        };
-
-        println!(
-            "SPIKE_FIRE armed: arm={arm} delay={delay_secs}s target={}",
-            scheduled_for.to_rfc3339()
-        );
-        wait_until(scheduled_for);
-        let fired_at = Utc::now();
-
-        let record = FireSpikeRecord {
-            arm: arm.clone(),
-            scheduled_for,
-            fired_at,
-            latency_ms: (fired_at - scheduled_for).num_milliseconds(),
-            delay_secs,
-            on_battery: on_battery(),
-            macos: macos_version(),
-        };
-        println!("SPIKE_FIRE fired: {}", serde_json::to_string(&record).unwrap());
-
-        if let Ok(dir) = app.path().app_data_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("fire-spike.jsonl"))
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "{}", serde_json::to_string(&record).unwrap());
-            }
-        }
-        app.exit(0);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn snap_event(key: &str) -> AlarmEvent {
-        let start = DateTime::parse_from_rfc3339("2026-06-10T10:00:00Z").unwrap().with_timezone(&Utc);
-        AlarmEvent {
-            occurrence_key: key.into(),
-            title: "t".into(),
-            start,
-            end: start + ChronoDuration::seconds(900),
-            all_day: false,
-            status: "confirmed".into(),
-            my_rsvp: None,
-            has_link: true,
-        }
-    }
-
-    fn at(rfc3339: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)
-    }
-
-    #[test]
-    fn snapshot_serves_last_good_events_while_fresh() {
-        // The prime-directive case: reads die mid-episode (the 4m31s wedge) —
-        // the alarm path must keep the last good read, not starve.
-        let mut s = SnapshotCache::new();
-        assert!(s.serve(at("2026-06-10T09:00:00Z")).is_none(), "no good read yet → nothing");
-        s.store(&[snap_event("a"), snap_event("b")], at("2026-06-10T09:00:00Z"));
-        let (events, age) = s.serve(at("2026-06-10T09:05:00Z")).expect("fresh snapshot serves");
-        assert_eq!(events.len(), 2);
-        assert_eq!(age, 300);
-    }
-
-    #[test]
-    fn snapshot_expires_past_its_fetch_window() {
-        // A snapshot only fetched +2 days of events — past 48h it can't promise
-        // coverage and serving it would feign health. Cut it off.
-        let mut s = SnapshotCache::new();
-        s.store(&[snap_event("a")], at("2026-06-10T09:00:00Z"));
-        assert!(s.serve(at("2026-06-12T09:00:00Z")).is_some(), "exactly 48h still serves");
-        assert!(s.serve(at("2026-06-12T09:00:01Z")).is_none(), "past 48h expires");
-    }
-
-    #[test]
-    fn snapshot_store_replaces_wholesale() {
-        // Every good read replaces the snapshot (no merge): a meeting deleted
-        // upstream must vanish from the next snapshot, not linger.
-        let mut s = SnapshotCache::new();
-        s.store(&[snap_event("a"), snap_event("b")], at("2026-06-10T09:00:00Z"));
-        s.store(&[snap_event("c")], at("2026-06-10T09:01:00Z"));
-        let (events, _) = s.serve(at("2026-06-10T09:02:00Z")).unwrap();
-        assert_eq!(events.iter().map(|e| e.occurrence_key.as_str()).collect::<Vec<_>>(), ["c"]);
-    }
 
     #[test]
     fn presence_transition_only_logs_on_the_edge() {

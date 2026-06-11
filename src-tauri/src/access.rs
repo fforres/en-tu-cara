@@ -197,6 +197,89 @@ impl Default for GrantRepairTracker {
     }
 }
 
+/// The COMPLETE access-health state for one process — the debounced announcer,
+/// the repair escalation, and the downtime counter — as one model behind one
+/// lock. Before this existed, the scheduler smeared these across three statics
+/// taken under three separate locks per tick (and re-locked one mid-edge, which
+/// hid a real bug: the recovery tick zeroes the down-counter BEFORE the
+/// debounce confirms Restored, so "was down N tick(s)" always reported 0).
+/// Facets of one conceptual state travel together. Pure: the caller owns all
+/// side effects (store rebuild, loud surfaces, repair execution).
+pub struct AccessHealth {
+    tracker: AccessTracker,
+    repair: GrantRepairTracker,
+    /// Consecutive raw-Lost ticks in the CURRENT dip (0 while healthy).
+    down_ticks: u32,
+    /// Length of the most recently ENDED dip — what a Restored edge reports
+    /// (by the time the debounce confirms recovery, `down_ticks` is already 0).
+    last_episode: u32,
+}
+
+/// One tick's verdict: the raw reading plus which side effects are due.
+pub struct Observation {
+    /// Undebounced. Lost → the caller rebuilds the event store (the cheap,
+    /// always-safe self-heal that fixes a merely-stale store by next tick).
+    pub raw: AccessState,
+    /// Debounced transition, if any — drive the loud surfaces once per edge.
+    pub edge: Option<AccessEdge>,
+    /// The grant itself looks unusable — fire the TCC repair (once/episode).
+    pub repair_due: bool,
+    /// On a `Restored` edge: how many ticks the ended episode lasted.
+    /// Otherwise: the current dip's running count.
+    pub down_ticks: u32,
+}
+
+impl AccessHealth {
+    pub const fn new() -> Self {
+        Self {
+            tracker: AccessTracker::new(),
+            repair: GrantRepairTracker::new(),
+            down_ticks: 0,
+            last_episode: 0,
+        }
+    }
+
+    /// Feed one real read's (auth, fetch) pair; returns everything the caller
+    /// must act on. The classification, both trackers, and the downtime counter
+    /// advance together — one lock, one call, no partially-applied state.
+    pub fn observe(&mut self, auth: AuthKind, fetch: FetchOutcome) -> Observation {
+        let (raw, reason) = classify(auth, fetch);
+        match raw {
+            AccessState::Lost => self.down_ticks += 1,
+            AccessState::Ok => {
+                if self.down_ticks > 0 {
+                    self.last_episode = self.down_ticks;
+                }
+                self.down_ticks = 0;
+            }
+        }
+        let edge = self.tracker.observe(raw, reason);
+        let repair_due = self.repair.observe(raw, reason);
+        let down_ticks = if matches!(edge, Some(AccessEdge::Restored)) {
+            self.last_episode
+        } else {
+            self.down_ticks
+        };
+        Observation { raw, edge, repair_due, down_ticks }
+    }
+
+    /// The currently-surfaced state (what the badge/banner reflect).
+    pub fn announced(&self) -> AccessState {
+        self.tracker.announced()
+    }
+
+    /// The reason tag of the announced Lost state ("" when announced-Ok).
+    pub fn announced_reason(&self) -> &'static str {
+        self.tracker.announced_reason()
+    }
+}
+
+impl Default for AccessHealth {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 // --- Loud surfaces (macOS) --------------------------------------------------
 // All three surfaces fired on the Lost/Restored edge. Each is non-blocking so the
 // scheduler tick that calls these never stalls the alarm path.
@@ -357,6 +440,46 @@ mod tests {
         t.observe(AccessState::Ok, "");
         assert!(!lost_fetch(&mut t, 5), "streak restarted after recovery");
         assert!(t.observe(AccessState::Lost, REASON_FETCH_FAILED), "re-armed: a NEW episode fires");
+    }
+
+    // --- AccessHealth (the one-lock aggregate) -------------------------------
+
+    #[test]
+    fn access_health_drives_all_three_facets_from_one_observation() {
+        // One Lost episode end-to-end: store-rebuild cue every Lost tick, one
+        // debounced Lost edge, repair due exactly once, and the Restored edge
+        // reporting the episode length.
+        let mut h = AccessHealth::new();
+        let mut lost_edges = 0;
+        let mut repairs = 0;
+        for tick in 1..=8 {
+            let obs = h.observe(AuthKind::FullAccess, FetchOutcome::Failed);
+            assert_eq!(obs.raw, AccessState::Lost, "every failed read cues a store rebuild");
+            assert_eq!(obs.down_ticks, tick, "running dip count");
+            lost_edges += matches!(obs.edge, Some(AccessEdge::Lost { .. })) as u32;
+            repairs += obs.repair_due as u32;
+        }
+        assert_eq!(lost_edges, 1, "loud surfaces fire once per episode");
+        assert_eq!(repairs, 1, "repair fires once per episode");
+        assert_eq!(h.announced(), AccessState::Lost);
+        assert_eq!(h.announced_reason(), REASON_FETCH_FAILED);
+    }
+
+    #[test]
+    fn restored_edge_reports_the_episode_length_not_zero() {
+        // The bug the aggregate fixed: with separate statics, the recovery tick
+        // zeroed the down-counter BEFORE the debounce confirmed Restored, so the
+        // "was down N tick(s)" log/telemetry always said 0. The Restored edge
+        // must carry the ended episode's real length.
+        let mut h = AccessHealth::new();
+        for _ in 0..5 {
+            h.observe(AuthKind::FullAccess, FetchOutcome::Failed);
+        }
+        let first_ok = h.observe(AuthKind::FullAccess, FetchOutcome::Ok);
+        assert!(first_ok.edge.is_none(), "recovery not yet confirmed");
+        let second_ok = h.observe(AuthKind::FullAccess, FetchOutcome::Ok);
+        assert_eq!(second_ok.edge, Some(AccessEdge::Restored));
+        assert_eq!(second_ok.down_ticks, 5, "Restored reports the 5-tick episode, not 0");
     }
 
     #[test]
