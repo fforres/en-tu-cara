@@ -377,6 +377,23 @@ pub fn attempt_grant_repair(app: &tauri::AppHandle, trigger: &'static str) {
         log::info!("grant repair: skipped (cooldown; trigger={trigger})");
         return;
     }
+    // Debounce ALL triggers for 60s: each repair resets the record AND shows a
+    // prompt — a re-trigger 3s later (live finding: rapid Settings-button
+    // clicks) resets again, invalidating the prompt already on screen, so the
+    // user's eventual "Allow" click lands on a stale dialog. One repair gets a
+    // full minute to reach its prompt before another may start. (The manual
+    // path bypasses only the LONG cooldown above, not this.)
+    {
+        static IN_FLIGHT_SINCE: std::sync::Mutex<Option<std::time::Instant>> =
+            std::sync::Mutex::new(None);
+        let mut since = IN_FLIGHT_SINCE.lock().unwrap_or_else(|e| e.into_inner());
+        let now = std::time::Instant::now();
+        if since.is_some_and(|t| now.duration_since(t) < std::time::Duration::from_secs(60)) {
+            log::info!("grant repair: skipped (one already in flight; trigger={trigger})");
+            return;
+        }
+        *since = Some(now);
+    }
     let app = app.clone();
     std::thread::spawn(move || {
         let bundle_id = app.config().identifier.clone();
