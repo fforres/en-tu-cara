@@ -7,10 +7,7 @@
 //!     `NSActivityLatencyCritical` assertion — `.userInitiated` alone does NOT
 //!     defeat App Nap timer throttling. Held WINDOWED (≤2 min before fire), not 24/7.
 //!
-//! CP1d spike: ENTUCARA_SPIKE_FIRE="<delay_secs>,<arm>" with arm ∈
-//! none | userinitiated | latencycritical. Arms an alarm <delay_secs> out, holds the
-//! requested assertion, fires, and appends a latency record to
-//! ~/Library/Application Support/dev.fforres.entucara/fire-spike.jsonl, then exits.
+//! The CP1d latency-measurement spike lives in fire_spike.rs.
 
 #![cfg(target_os = "macos")]
 
@@ -18,7 +15,6 @@ use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use objc2::rc::Retained;
 use objc2::runtime::NSObjectProtocol;
 use objc2_foundation::{NSActivityOptions, NSProcessInfo, NSString};
-use serde::Serialize;
 use std::time::Duration;
 
 /// RAII holder for an NSProcessInfo activity assertion.
@@ -43,49 +39,6 @@ impl Drop for ActivityAssertion {
     }
 }
 
-#[derive(Debug, Serialize)]
-struct FireSpikeRecord {
-    arm: String,
-    scheduled_for: DateTime<Utc>,
-    fired_at: DateTime<Utc>,
-    latency_ms: i64,
-    delay_secs: i64,
-    on_battery: bool,
-    macos: String,
-}
-
-fn on_battery() -> bool {
-    std::process::Command::new("pmset")
-        .args(["-g", "batt"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("Battery Power"))
-        .unwrap_or(false)
-}
-
-fn macos_version() -> String {
-    std::process::Command::new("sw_vers")
-        .arg("-productVersion")
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default()
-}
-
-/// Wall-clock-targeted wait: short ticks, re-checking the target each time.
-/// Under App Nap the TICKS get stretched — which is exactly the latency we measure.
-/// (Production will also re-arm on NSWorkspace didWake; spike keeps it minimal.)
-fn wait_until(target: DateTime<Utc>) {
-    loop {
-        let now = Utc::now();
-        if now >= target {
-            return;
-        }
-        let remaining = (target - now).num_milliseconds();
-        // Coarse ticks far out, fine ticks close in.
-        let tick = if remaining > 10_000 { 1_000 } else { 50 };
-        std::thread::sleep(Duration::from_millis(tick.min(remaining.max(1)) as u64));
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Production loop (Phase 3)
 // ---------------------------------------------------------------------------
@@ -107,15 +60,11 @@ pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new())
 /// transition log below. None = no tick has run yet.
 static LAST_EVENT_PRESENCE: Mutex<Option<bool>> = Mutex::new(None);
 
-/// Debounced calendar-access health tracker (announces a transition only after
-/// it's held for a couple ticks — see access::AccessTracker). Only real reads
-/// feed it (test/injected runs never do).
-static ACCESS_TRACKER: Mutex<crate::access::AccessTracker> =
-    Mutex::new(crate::access::AccessTracker::new());
-
-/// Count of consecutive ticks spent in the Lost state — a no-PII "how long were
-/// alerts down" proxy reported on recovery.
-static ACCESS_DOWN_TICKS: Mutex<u32> = Mutex::new(0);
+/// The complete calendar-access health state (debounced announcer + repair
+/// escalation + downtime counter) behind ONE lock — see access::AccessHealth.
+/// Only real reads feed it (test/injected runs never do).
+static ACCESS_HEALTH: Mutex<crate::access::AccessHealth> =
+    Mutex::new(crate::access::AccessHealth::new());
 
 /// Decide whether a per-tick event count warrants an INFO line. We log only on
 /// the EDGE (had events → 0, or 0 → had events), never every tick: the steady
@@ -148,10 +97,17 @@ pub fn get_active_alarms() -> Vec<serde_json::Value> {
 
 /// Current calendar-access health, for the Settings banner to read on mount (it
 /// also listens for live `access-state-changed` events). `None`/`Ok` → "ok".
+/// `reason` (only meaningful when lost) lets the banners differentiate a
+/// revoked grant (user must re-grant) from reads failing despite a grant (ours
+/// to repair) — matching the live event's payload shape.
 #[tauri::command]
 pub fn get_access_state() -> serde_json::Value {
-    let lost = lock_resilient(&ACCESS_TRACKER).announced() == crate::access::AccessState::Lost;
-    serde_json::json!({ "state": if lost { "lost" } else { "ok" } })
+    let health = lock_resilient(&ACCESS_HEALTH);
+    let lost = health.announced() == crate::access::AccessState::Lost;
+    serde_json::json!({
+        "state": if lost { "lost" } else { "ok" },
+        "reason": health.announced_reason(),
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,6 +234,12 @@ fn test_access_override() -> Option<(crate::access::AuthKind, crate::access::Fet
     })
 }
 
+/// Last-good event snapshot for the ALARM path (see snapshot.rs — the final
+/// line of defense for the prime directive: alarms must not starve when reads
+/// fail). The cache owns its own once-per-episode log edges.
+static SNAPSHOT: Mutex<crate::snapshot::SnapshotCache> =
+    Mutex::new(crate::snapshot::SnapshotCache::new());
+
 fn upcoming_alarm_events(
     settings: &crate::settings::Settings,
 ) -> (Vec<AlarmEvent>, Option<crate::access::FetchOutcome>) {
@@ -296,37 +258,55 @@ fn upcoming_alarm_events(
     // can't clip the next 24h); over-fetching is free, compute_actions filters by
     // time.
     let events = crate::calendar::active_events(&settings.enabled_calendar_ids, 1, 2);
-    let outcome = if events.is_ok() {
-        crate::access::FetchOutcome::Ok
-    } else {
-        crate::access::FetchOutcome::Failed
-    };
-    if let Err(ref e) = events {
-        // A read failing here means the alarm pipeline is starved — record it
-        // (reason only; no event content is involved in a failed read).
-        crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
+    let now = crate::testmode::clock::now();
+    match events {
+        Ok(events) => {
+            let parsed: Vec<AlarmEvent> = events
+                .into_iter()
+                .filter_map(|e| {
+                    Some(AlarmEvent {
+                        start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
+                        end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
+                        has_link: crate::calendar::has_meeting_link(
+                            e.url.as_deref(),
+                            e.location.as_deref(),
+                            e.notes.as_deref(),
+                        ),
+                        occurrence_key: e.occurrence_key,
+                        title: e.title,
+                        all_day: e.all_day,
+                        status: e.status,
+                        my_rsvp: e.my_rsvp,
+                    })
+                })
+                .collect();
+            if lock_resilient(&SNAPSHOT).store(&parsed, now) {
+                log::info!("calendar reads recovered — back to live events (snapshot retired)");
+            }
+            (parsed, Some(crate::access::FetchOutcome::Ok))
+        }
+        Err(e) => {
+            // Reads are failing — the access machine (fed Failed below) owns the
+            // loud surfaces + repair. The ALARM path must not starve meanwhile:
+            // serve the last good snapshot while it's within its window.
+            crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
+            let events = match lock_resilient(&SNAPSHOT).serve(now) {
+                Some(stale) => {
+                    if stale.first {
+                        log::warn!(
+                            "calendar read failed — serving {} event(s) from the last good \
+                             snapshot ({}s old); alerts stay armed while access heals",
+                            stale.events.len(),
+                            stale.age_secs
+                        );
+                    }
+                    stale.events
+                }
+                None => Vec::new(),
+            };
+            (events, Some(crate::access::FetchOutcome::Failed))
+        }
     }
-    let parsed = events
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|e| {
-            Some(AlarmEvent {
-                start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
-                end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
-                has_link: crate::calendar::has_meeting_link(
-                    e.url.as_deref(),
-                    e.location.as_deref(),
-                    e.notes.as_deref(),
-                ),
-                occurrence_key: e.occurrence_key,
-                title: e.title,
-                all_day: e.all_day,
-                status: e.status,
-                my_rsvp: e.my_rsvp,
-            })
-        })
-        .collect();
-    (parsed, Some(outcome))
 }
 
 /// Evaluate calendar-access health for one real read and act on any transition.
@@ -337,21 +317,28 @@ fn check_calendar_access(
     auth: crate::access::AuthKind,
     fetch: crate::access::FetchOutcome,
 ) {
-    let (raw, reason) = crate::access::classify(auth, fetch);
+    let obs = lock_resilient(&ACCESS_HEALTH).observe(auth, fetch);
     // Self-heal BEFORE the debounce announces: on any failing read, force a fresh
     // event store for the next tick. If a stale store was all it was, the next
     // read succeeds and the debounce never announces — recovery is silent (no
     // useless "lost"/"Grant access" notification for an already-valid grant).
-    match raw {
-        crate::access::AccessState::Lost => {
-            crate::calendar::invalidate_event_store();
-            *lock_resilient(&ACCESS_DOWN_TICKS) += 1;
-        }
-        crate::access::AccessState::Ok => *lock_resilient(&ACCESS_DOWN_TICKS) = 0,
+    if obs.raw == crate::access::AccessState::Lost {
+        crate::calendar::invalidate_event_store();
     }
-    let edge = lock_resilient(&ACCESS_TRACKER).observe(raw, reason);
-    if let Some(edge) = edge {
-        on_access_edge(app, &edge);
+    if let Some(edge) = &obs.edge {
+        on_access_edge(app, edge, obs.down_ticks);
+    }
+    // Escalation: per-tick store rebuilds (above) fix a stale store; when N
+    // consecutive REBUILT stores still read nothing despite FullAccess, the TCC
+    // record itself is unusable (the 2026-06-10 poisoned-grant incident) —
+    // destroy + re-grant it. Fires once per loss episode; all rails (test mode,
+    // cooldown, identity guard) live in grant_repair::attempt.
+    if obs.repair_due {
+        log::warn!(
+            "calendar grant appears unusable (authorized, but reads kept failing through \
+             store rebuilds) — attempting automatic TCC grant repair"
+        );
+        crate::grant_repair::attempt(app, "auto");
     }
 }
 
@@ -359,7 +346,7 @@ fn check_calendar_access(
 /// transition, not every tick). Everything here must be non-blocking — it runs
 /// inside the tick, which must never stall the alarm path; the loud surfaces and
 /// self-heal all dispatch via spawn / run_on_main_thread / try_send.
-fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge) {
+fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge, down_ticks: u32) {
     match edge {
         crate::access::AccessEdge::Lost { reason } => {
             log::warn!("calendar access lost ({reason}) — alerts are paused until it is restored");
@@ -371,9 +358,13 @@ fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge) {
             crate::calendar::attempt_self_heal(app, reason);
         }
         crate::access::AccessEdge::Restored => {
-            let down = *lock_resilient(&ACCESS_DOWN_TICKS);
-            log::info!("calendar access restored — alerts active again (was down {down} tick(s))");
-            crate::telemetry::record("calendar_access_restored", serde_json::json!({ "down_ticks": down }));
+            log::info!(
+                "calendar access restored — alerts active again (was down {down_ticks} tick(s))"
+            );
+            crate::telemetry::record(
+                "calendar_access_restored",
+                serde_json::json!({ "down_ticks": down_ticks }),
+            );
             crate::access::announce_restored(app);
         }
     }
@@ -774,71 +765,6 @@ pub fn get_ignored(app: tauri::AppHandle) -> Vec<String> {
     keys
 }
 
-// ---------------------------------------------------------------------------
-// CP1d spike (kept for latency re-measurement)
-// ---------------------------------------------------------------------------
-
-/// CP1d: ENTUCARA_SPIKE_FIRE="<delay_secs>,<arm>" → measure fire latency, exit app.
-pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
-    let Ok(spec) = std::env::var("ENTUCARA_SPIKE_FIRE") else {
-        return;
-    };
-    let (delay_str, arm) = spec.split_once(',').unwrap_or((spec.as_str(), "none"));
-    let delay_secs: i64 = delay_str.parse().unwrap_or(60);
-    let arm = arm.to_lowercase();
-    let app = app.clone();
-
-    std::thread::spawn(move || {
-        let scheduled_for = Utc::now() + ChronoDuration::seconds(delay_secs);
-
-        // Hold the requested assertion for the whole wait. (Production holds it
-        // windowed ≤2 min before fire; the spike holds it throughout so the arm
-        // under test is unambiguous.)
-        let _assertion = match arm.as_str() {
-            "userinitiated" => Some(ActivityAssertion::begin(
-                NSActivityOptions::UserInitiated,
-                "en-tu-cara fire spike: userInitiated",
-            )),
-            "latencycritical" => Some(ActivityAssertion::begin(
-                NSActivityOptions::UserInitiated | NSActivityOptions::LatencyCritical,
-                "en-tu-cara fire spike: userInitiated|latencyCritical",
-            )),
-            _ => None,
-        };
-
-        println!(
-            "SPIKE_FIRE armed: arm={arm} delay={delay_secs}s target={}",
-            scheduled_for.to_rfc3339()
-        );
-        wait_until(scheduled_for);
-        let fired_at = Utc::now();
-
-        let record = FireSpikeRecord {
-            arm: arm.clone(),
-            scheduled_for,
-            fired_at,
-            latency_ms: (fired_at - scheduled_for).num_milliseconds(),
-            delay_secs,
-            on_battery: on_battery(),
-            macos: macos_version(),
-        };
-        println!("SPIKE_FIRE fired: {}", serde_json::to_string(&record).unwrap());
-
-        if let Ok(dir) = app.path().app_data_dir() {
-            let _ = std::fs::create_dir_all(&dir);
-            if let Ok(mut f) = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(dir.join("fire-spike.jsonl"))
-            {
-                use std::io::Write;
-                let _ = writeln!(f, "{}", serde_json::to_string(&record).unwrap());
-            }
-        }
-        app.exit(0);
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -937,6 +863,32 @@ mod tests {
         assert!(
             retain_other_occurrences(&active, "(A @ t)").is_empty(),
             "removing the last occurrence empties the set so the overlay closes"
+        );
+    }
+
+    #[test]
+    fn get_access_state_default_shape_is_ok_with_empty_reason() {
+        // Contract test for the Settings / tray-popover banner. The UI does
+        // `s?.reason ?? ""` — the "reason" key MUST be present (not just absent)
+        // so the null-coalescing works correctly in both the ok and lost paths.
+        // ACCESS_TRACKER starts announced-Ok (see AccessTracker::new), so a
+        // freshly-started process always returns { state: "ok", reason: "" }.
+        // We test the SHAPE here (key presence + value), not a Lost transition
+        // (the pure AccessTracker machine is exhaustively tested in access.rs).
+        let state = get_access_state();
+        assert_eq!(
+            state.get("state").and_then(|v| v.as_str()),
+            Some("ok"),
+            "default state must be 'ok'"
+        );
+        assert!(
+            state.get("reason").is_some(),
+            "\"reason\" key must always be present — the UI does `s?.reason ?? \"\"`"
+        );
+        assert_eq!(
+            state.get("reason").and_then(|v| v.as_str()),
+            Some(""),
+            "reason must be \"\" when state is ok"
         );
     }
 }

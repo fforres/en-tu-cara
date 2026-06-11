@@ -36,6 +36,40 @@ fn identity_warning(identifier: &str, team: &str) -> Option<String> {
     })
 }
 
+/// THE canonical "what signature is this process actually running under" read:
+/// shells `codesign -dvvv` on the current executable and parses it. Both the
+/// startup identity log and the grant-repair guard go through here — one
+/// shell-out shape, one parser. Takes tens of ms; call off the main/alarm path
+/// only. `Err` carries a human-readable why (can't resolve exe / codesign
+/// failed).
+pub fn running_signing_info() -> Result<SigningInfo, &'static str> {
+    let exe = std::env::current_exe().map_err(|_| "could not resolve the running executable")?;
+    let output = std::process::Command::new("codesign")
+        .args(["-dvvv", "--verbose=4"])
+        .arg(&exe)
+        .output()
+        .map_err(|_| "codesign could not inspect the running binary")?;
+    Ok(parse_codesign_output(&String::from_utf8_lossy(&output.stderr)))
+}
+
+/// Is it SAFE for this running build to destroy + recreate the TCC record for
+/// `bundle_id` (the grant-repair self-heal in grant_repair.rs)? Unsafe = an
+/// ad-hoc/local build running under the PRODUCTION bundle id (gotcha #5): a
+/// repair from it would nuke the release's grant — the exact disaster the dev
+/// bundle id exists to prevent. Returns Some(reason) when repair must be
+/// skipped. "Can't verify" also blocks: a destructive self-heal needs positive
+/// proof it's the real release (or a dev build under its own id), not a guess.
+/// Shells `codesign` (via running_signing_info) — off the main/alarm path only.
+pub fn grant_repair_blocker(bundle_id: &str) -> Option<String> {
+    if bundle_id != PROD_IDENTIFIER {
+        return None; // dev/test ids own their grant — always safe to repair.
+    }
+    match running_signing_info() {
+        Ok(info) => identity_warning(bundle_id, &info.team),
+        Err(why) => Some(why.into()),
+    }
+}
+
 /// Parse the stderr of `codesign -dvvv`. Pure + tested. Ad-hoc / unsigned
 /// binaries (no Authority / TeamIdentifier line) map to clear sentinels so a dev
 /// build is obvious in the logs.
@@ -63,18 +97,13 @@ pub fn parse_codesign_output(text: &str) -> SigningInfo {
 #[cfg(target_os = "macos")]
 pub fn log_signing_identity(version: String, bundle_id: String) {
     std::thread::spawn(move || {
-        let Ok(exe) = std::env::current_exe() else {
-            return;
+        let info = match running_signing_info() {
+            Ok(info) => info,
+            Err(why) => {
+                log::warn!("startup identity: {why}");
+                return;
+            }
         };
-        let output = std::process::Command::new("codesign")
-            .args(["-dvvv", "--verbose=4"])
-            .arg(&exe)
-            .output();
-        let Ok(output) = output else {
-            log::warn!("startup identity: codesign failed to run");
-            return;
-        };
-        let info = parse_codesign_output(&String::from_utf8_lossy(&output.stderr));
         log::info!(
             "startup identity: v{version} bundle_id={bundle_id} codesign_id={} team={} authority={:?}",
             info.identifier,
