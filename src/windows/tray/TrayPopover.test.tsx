@@ -321,4 +321,120 @@ describe("TrayPopover", () => {
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.getByText("IGNORED")).toBeInTheDocument();
   });
+
+  // --- Access banner reason-aware copy tests ---
+  //
+  // The banner has TWO distinct messages. Showing the wrong one during an outage
+  // actively misleads the user: "fetch_failed_despite_authorized" means EventKit
+  // is still granted but temporarily unresponsive — events shown ARE a stale
+  // snapshot and will self-repair, so users should wait. Any other reason means
+  // the grant is gone — events ARE outdated and the user must act. Mixing the two
+  // branches causes either false reassurance ("Repairing automatically" when the
+  // grant is revoked) or a false alarm ("Open Settings to fix" when self-repair
+  // is already running).
+
+  it("mount with state=lost reason=fetch_failed_despite_authorized shows the stale-snapshot copy", async () => {
+    // Regression: mount-time get_access_state must populate accessReason before
+    // the banner renders, so the "Repairing automatically" branch fires for the
+    // self-healing fetch failure — not the generic "Open Settings to fix" copy.
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "refresh_popover":
+          return Promise.resolve([futureEvent()]);
+        case "list_calendars":
+          return Promise.resolve([
+            { id: "work", title: "Work", account: "me", color: [0.2, 0.4, 1, 1] },
+          ]);
+        case "get_paused":
+          return Promise.resolve(false);
+        case "get_ignored":
+          return Promise.resolve([] as string[]);
+        case "get_access_state":
+          return Promise.resolve({ state: "lost", reason: "fetch_failed_despite_authorized" });
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    const banner = await screen.findByRole("alert");
+    // "Repairing automatically" is the distinctive phrase for the self-healing
+    // path; the generic branch never contains it.
+    expect(banner).toHaveTextContent(/Repairing automatically/i);
+    // Sanity: the generic "Open Settings to fix" copy must NOT appear when the
+    // reason is the self-healing one (that would send the user to Settings for
+    // something that fixes itself, wasting their time during an outage).
+    expect(banner).not.toHaveTextContent(/Open Settings to fix/i);
+  });
+
+  it("mount with state=lost reason=authorization_not_determined shows the generic access-lost copy", async () => {
+    // Regression: a reason OTHER than fetch_failed_despite_authorized must land
+    // on the generic "access lost — these events may be outdated. Open Settings"
+    // copy, telling the user the grant is gone and they need to act — not that
+    // self-repair is running.
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "refresh_popover":
+          return Promise.resolve([futureEvent()]);
+        case "list_calendars":
+          return Promise.resolve([
+            { id: "work", title: "Work", account: "me", color: [0.2, 0.4, 1, 1] },
+          ]);
+        case "get_paused":
+          return Promise.resolve(false);
+        case "get_ignored":
+          return Promise.resolve([] as string[]);
+        case "get_access_state":
+          return Promise.resolve({ state: "lost", reason: "authorization_not_determined" });
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/may be outdated/i);
+    expect(banner).toHaveTextContent(/Open Settings to fix/i);
+    // Sanity: "Repairing automatically" must NOT appear — this reason requires
+    // the user to act, not wait.
+    expect(banner).not.toHaveTextContent(/Repairing automatically/i);
+  });
+
+  it("live event ok→lost(fetch_failed) shows stale-snapshot copy; subsequent ok removes the banner", async () => {
+    // Regression: the live "access-state-changed" edge must also populate
+    // accessReason correctly (not just the mount-time get_access_state call).
+    // Without this, a live revocation mid-session shows the wrong copy.
+    // Also verifies that a follow-up state=ok event clears the banner entirely,
+    // so a recovered session doesn't leave a stale warning on screen.
+    render(<TrayPopover />);
+    // Start clean — no banner.
+    expect(await screen.findByText("Design sync")).toBeInTheDocument();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Live edge: access lost with the self-healing reason.
+    listeners.get("access-state-changed")?.({
+      payload: { state: "lost", reason: "fetch_failed_despite_authorized" },
+    });
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/Repairing automatically/i);
+
+    // Recovery edge: state=ok must remove the banner unconditionally.
+    listeners.get("access-state-changed")?.({ payload: { state: "ok" } });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("live event with reason=undefined falls back to generic copy without crashing", async () => {
+    // Regression: the payload type allows reason to be absent (optional field).
+    // accessReason must default to "" so the banner uses the generic branch — not
+    // crash or render nothing — when the backend omits reason. A crash here would
+    // silently suppress the access warning, hiding it from a user who needs it.
+    render(<TrayPopover />);
+    expect(await screen.findByText("Design sync")).toBeInTheDocument();
+
+    // Fire a lost event with NO reason field at all.
+    listeners.get("access-state-changed")?.({ payload: { state: "lost" } });
+    const banner = await screen.findByRole("alert");
+    // No reason → falls through to generic copy.
+    expect(banner).toHaveTextContent(/may be outdated/i);
+    expect(banner).toHaveTextContent(/Open Settings to fix/i);
+    expect(banner).not.toHaveTextContent(/Repairing automatically/i);
+  });
 });

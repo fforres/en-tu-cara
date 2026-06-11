@@ -320,4 +320,113 @@ describe("SettingsWindow", () => {
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "qqqqxxxx" } });
     expect(await screen.findByText("No settings match.")).toBeInTheDocument();
   });
+
+  // Regression: the "stopped responding" loss mode (poisoned TCC record) needs a
+  // different CTA than a plain revocation — "Repair access" fires repair_calendar_access,
+  // NOT request_calendar_access. Conflating them would send the user through a
+  // redundant re-prompt that can't actually fix the corrupted record.
+  it("get_access_state:lost+fetch_failed_despite_authorized → Repair banner; clicking invokes repair_calendar_access", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_settings") {
+        return Promise.resolve({ ...DEFAULTS });
+      }
+      if (cmd === "calendar_authorization_status") {
+        return Promise.resolve("FullAccess");
+      }
+      if (cmd === "list_calendars") {
+        return Promise.resolve(CALENDARS);
+      }
+      if (cmd === "list_system_sounds") {
+        return Promise.resolve(["Sosumi"]);
+      }
+      if (cmd === "get_access_state") {
+        return Promise.resolve({ state: "lost", reason: "fetch_failed_despite_authorized" });
+      }
+      return Promise.resolve(undefined);
+    });
+    await renderSettings();
+    const banner = await screen.findByRole("alert");
+    // Scoped to the access banner: must NOT fire for an unrelated alert element.
+    expect(banner).toHaveTextContent(/Calendar stopped responding — alerts are paused/i);
+    // The "Grant" button must not appear for this loss mode.
+    expect(screen.queryByRole("button", { name: "Grant calendar access" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Repair access" }));
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some((c: unknown[]) => c[0] === "repair_calendar_access")).toBe(
+        true,
+      ),
+    );
+    // Confirm the wrong command was never called.
+    expect(invokeMock.mock.calls.some((c: unknown[]) => c[0] === "request_calendar_access")).toBe(
+      false,
+    );
+  });
+
+  // Regression: plain access revocation (authorization_not_determined, denied, etc.)
+  // must route to the Grant CTA, not the Repair CTA — the two loss modes are distinct.
+  it("get_access_state:lost+authorization_not_determined → Grant banner; clicking invokes request_calendar_access", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      if (cmd === "get_settings") {
+        return Promise.resolve({ ...DEFAULTS });
+      }
+      if (cmd === "calendar_authorization_status") {
+        return Promise.resolve("FullAccess");
+      }
+      if (cmd === "list_calendars") {
+        return Promise.resolve(CALENDARS);
+      }
+      if (cmd === "list_system_sounds") {
+        return Promise.resolve(["Sosumi"]);
+      }
+      if (cmd === "get_access_state") {
+        return Promise.resolve({ state: "lost", reason: "authorization_not_determined" });
+      }
+      return Promise.resolve(undefined);
+    });
+    await renderSettings();
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/Calendar access was lost — alerts are paused/i);
+    // The "Repair" button must not appear for a plain revocation.
+    expect(screen.queryByRole("button", { name: "Repair access" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Grant calendar access" }));
+    await waitFor(() =>
+      expect(invokeMock.mock.calls.some((c: unknown[]) => c[0] === "request_calendar_access")).toBe(
+        true,
+      ),
+    );
+  });
+
+  // Regression: the banner must react to live events — not just the mount-time pull.
+  // An initial healthy state followed by a fetch_failed_despite_authorized edge must
+  // raise the Repair banner; a subsequent ok edge must clear it without a reload.
+  it("live access-state-changed events: lost→Repair banner, then ok→banner clears", async () => {
+    // Default invokeMock: get_access_state returns undefined → healthy on mount.
+    await renderSettings();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // Emit the "stopped responding" loss edge.
+    listeners.get("access-state-changed")?.({
+      payload: { state: "lost", reason: "fetch_failed_despite_authorized" },
+    });
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/Calendar stopped responding — alerts are paused/i);
+    expect(screen.getByRole("button", { name: "Repair access" })).toBeInTheDocument();
+
+    // Recovery edge must clear the banner.
+    listeners.get("access-state-changed")?.({ payload: { state: "ok" } });
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  // Regression: a payload with no reason field (e.g. legacy Rust emission or partial
+  // payloads during startup) must not crash and must fall through to the Grant branch —
+  // the safer, user-actionable default.
+  it("access-state-changed with reason:undefined falls back to Grant branch without crashing", async () => {
+    await renderSettings();
+    // Fire a lost event with no reason property at all.
+    listeners.get("access-state-changed")?.({ payload: { state: "lost" } });
+    const banner = await screen.findByRole("alert");
+    expect(banner).toHaveTextContent(/Calendar access was lost — alerts are paused/i);
+    expect(screen.getByRole("button", { name: "Grant calendar access" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Repair access" })).toBeNull();
+  });
 });

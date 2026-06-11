@@ -1078,6 +1078,32 @@ mod tests {
             "removing the last occurrence empties the set so the overlay closes"
         );
     }
+
+    #[test]
+    fn get_access_state_default_shape_is_ok_with_empty_reason() {
+        // Contract test for the Settings / tray-popover banner. The UI does
+        // `s?.reason ?? ""` — the "reason" key MUST be present (not just absent)
+        // so the null-coalescing works correctly in both the ok and lost paths.
+        // ACCESS_TRACKER starts announced-Ok (see AccessTracker::new), so a
+        // freshly-started process always returns { state: "ok", reason: "" }.
+        // We test the SHAPE here (key presence + value), not a Lost transition
+        // (the pure AccessTracker machine is exhaustively tested in access.rs).
+        let state = get_access_state();
+        assert_eq!(
+            state.get("state").and_then(|v| v.as_str()),
+            Some("ok"),
+            "default state must be 'ok'"
+        );
+        assert!(
+            state.get("reason").is_some(),
+            "\"reason\" key must always be present — the UI does `s?.reason ?? \"\"`"
+        );
+        assert_eq!(
+            state.get("reason").and_then(|v| v.as_str()),
+            Some(""),
+            "reason must be \"\" when state is ok"
+        );
+    }
 }
 
 use tauri::Manager;

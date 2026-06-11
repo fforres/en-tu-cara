@@ -181,39 +181,6 @@ mod tests {
     }
 
     #[test]
-    fn eventkit_with_timeout_passes_results_through() {
-        let t = std::time::Duration::from_millis(500);
-        assert_eq!(eventkit_with_timeout("x", t, || Ok::<_, String>(7)), Ok(7));
-        assert_eq!(eventkit_with_timeout("x", t, || Err::<i32, _>("nope".into())), Err("nope".to_string()));
-    }
-
-    #[test]
-    fn eventkit_with_timeout_turns_a_blocked_read_into_an_err() {
-        // The live incident: a wedged calendar daemon BLOCKS the read instead of
-        // erroring — on the main thread that beach-balled the whole UI and froze
-        // the alarm loop. The wrapper must convert "no answer" into a plain Err
-        // the existing failure paths (snapshot, preserve-on-failure) handle.
-        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(20), || {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            Ok::<_, String>(1)
-        });
-        let err = result.unwrap_err();
-        assert!(err.contains("did not answer"), "got: {err}");
-    }
-
-    #[test]
-    fn eventkit_with_timeout_contains_a_worker_panic_as_err() {
-        // Belt over guard_eventkit's suspenders: a panicking worker drops the
-        // channel — the caller must see an Err, never an unwind or a hang.
-        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(500), || {
-            panic!("unexpected NULL");
-            #[allow(unreachable_code)]
-            Ok::<i32, String>(0)
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn guard_eventkit_contains_a_panic_as_err() {
         // The whole point: an EventKit NULL-panic must become an Err, never an
         // unwind into the scheduler tick or a Tauri command handler.
@@ -267,6 +234,185 @@ mod tests {
         assert_eq!(deduped.len(), 2);
         assert_eq!(deduped[0].occurrence_key, "(a @ t1)");
         assert_eq!(deduped[1].occurrence_key, "(a @ t2)");
+    }
+
+    // -----------------------------------------------------------------------
+    // Repair-cooldown regression tests (2026-06-10 incident).
+    //
+    // The cooldown file is the ONLY guard against a prompt loop on a machine
+    // where the repair doesn't take: a successful repair relaunches the app
+    // (relaunch-on-grant), wiping all in-process state, so an in-process
+    // cooldown would reset with it. The file survives restarts.
+    // -----------------------------------------------------------------------
+
+    /// Each test gets a unique scratch directory so parallel test runs can't
+    /// step on each other.
+    fn cooldown_scratch(tag: &str) -> std::path::PathBuf {
+        std::env::temp_dir()
+            .join(format!("entucara-cooldown-{tag}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn repair_cooldown_false_when_no_stamp_file() {
+        // No file at all → cooldown is NOT active: the first auto-repair attempt
+        // must always be allowed on a machine that has never had a repair.
+        let dir = cooldown_scratch("no-stamp");
+        let path = dir.join("grant-repair-last");
+        // Do NOT create the directory or file.
+        assert!(
+            !repair_cooldown_active_at(&path),
+            "missing stamp file must not be treated as an active cooldown"
+        );
+    }
+
+    #[test]
+    fn repair_cooldown_true_immediately_after_stamp() {
+        // A just-written stamp is within any sane 6-hour cooldown window.
+        // This is the guard against a repair loop on a machine where the fix
+        // doesn't take — the stamp must activate the gate the moment it's written.
+        let dir = cooldown_scratch("stamp-active");
+        let path = dir.join("grant-repair-last");
+        stamp_repair_cooldown_at(&path);
+        assert!(
+            repair_cooldown_active_at(&path),
+            "a just-written stamp must make the cooldown active"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repair_cooldown_double_stamp_is_idempotent() {
+        // Two stamps in a row must not error and the cooldown must still be active.
+        // Idempotency matters: attempt_grant_repair stamps BEFORE running tccutil
+        // so a process exit mid-repair leaves the file in place. A subsequent
+        // auto-trigger before the cooldown expires re-stamps, which is fine.
+        let dir = cooldown_scratch("double-stamp");
+        let path = dir.join("grant-repair-last");
+        stamp_repair_cooldown_at(&path);
+        stamp_repair_cooldown_at(&path); // must not panic or corrupt
+        assert!(
+            repair_cooldown_active_at(&path),
+            "cooldown must still be active after stamping twice"
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    // Mutex serialising all calls to eventkit_with_timeout within the test
+    // binary. IN_FLIGHT is a process-global AtomicUsize; without this lock,
+    // parallel tests can borrow slots from each other and cause the cap test to
+    // see a lower-than-expected slot count — or the cap test can starve the
+    // other tests by consuming all slots. One slot: correct cap behaviour,
+    // no flakiness. (The production code never needs this — it only runs on
+    // a single scheduler tick at a time in the real app.)
+    static EVENTKIT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn eventkit_with_timeout_passes_results_through() {
+        let _g = EVENTKIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let t = std::time::Duration::from_millis(500);
+        assert_eq!(eventkit_with_timeout("x", t, || Ok::<_, String>(7)), Ok(7));
+        assert_eq!(eventkit_with_timeout("x", t, || Err::<i32, _>("nope".into())), Err("nope".to_string()));
+    }
+
+    #[test]
+    fn eventkit_with_timeout_turns_a_blocked_read_into_an_err() {
+        // The live incident: a wedged calendar daemon BLOCKS the read instead of
+        // erroring — on the main thread that beach-balled the whole UI and froze
+        // the alarm loop. The wrapper must convert "no answer" into a plain Err
+        // the existing failure paths (snapshot, preserve-on-failure) handle.
+        let _g = EVENTKIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(20), || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok::<_, String>(1)
+        });
+        let err = result.unwrap_err();
+        assert!(err.contains("did not answer"), "got: {err}");
+    }
+
+    #[test]
+    fn eventkit_with_timeout_contains_a_worker_panic_as_err() {
+        // Belt over guard_eventkit's suspenders: a panicking worker drops the
+        // channel — the caller must see an Err, never an unwind or a hang.
+        let _g = EVENTKIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(500), || {
+            panic!("unexpected NULL");
+            #[allow(unreachable_code)]
+            Ok::<i32, String>(0)
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn eventkit_with_timeout_fails_fast_at_cap_without_waiting() {
+        // Regression for the 2026-06-10 incident: when all MAX_IN_FLIGHT (4) slots
+        // are occupied by wedged workers, a 5th call must fail immediately with a
+        // "failing fast" message, rather than blocking until its own timeout. Each
+        // blocked slot holds one stranded thread + one EKEventStore; capping them
+        // prevents uncontrolled resource growth while the daemon is unresponsive.
+        let _g = EVENTKIT_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tiny = std::time::Duration::from_millis(20);
+
+        // Barrier: 4 workers park here until we release them. Using a channel
+        // rather than thread::sleep so the test controls release precisely and
+        // the workers don't hold slots longer than needed.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let release_rx = std::sync::Arc::new(std::sync::Mutex::new(release_rx));
+
+        for _ in 0..4 {
+            let rx = std::sync::Arc::clone(&release_rx);
+            // Spawn 4 blocked calls. Each times out after `tiny` and strands
+            // its worker (worker blocks on the barrier, never reaches tx.send).
+            let _ = eventkit_with_timeout("blocker", tiny, move || {
+                // Park until released (or sender dropped).
+                let _ = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+                Ok::<(), String>(())
+            });
+        }
+        // Give the 4 workers a moment to register their IN_FLIGHT slots before
+        // the timeout expires. The workers run on background threads; a brief
+        // yield here is the minimum to let the OS schedule them and the atomic
+        // increments land before we probe the cap.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+
+        // 5th call: all slots occupied → must fail fast WITHOUT waiting for its
+        // own timeout.
+        let t0 = std::time::Instant::now();
+        let err = eventkit_with_timeout("probe", tiny, || Ok::<(), String>(()))
+            .unwrap_err();
+        let elapsed = t0.elapsed();
+        assert!(
+            err.contains("failing fast"),
+            "cap message must say 'failing fast', got: {err}"
+        );
+        assert!(
+            elapsed < tiny,
+            "cap must fail fast (elapsed {:?} ≥ timeout {:?})",
+            elapsed, tiny
+        );
+
+        // Release the 4 blocked workers so their threads can exit and the slots
+        // are returned.  Workers may already be gone if they timed out; the send
+        // errors are intentionally swallowed.
+        drop(release_tx);
+
+        // After the workers drain their slots we must be back to zero: a trivial
+        // call must succeed. Decrement is async (worker thread), so retry briefly.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(400);
+        loop {
+            let result = eventkit_with_timeout(
+                "recovery",
+                std::time::Duration::from_millis(200),
+                || Ok::<i32, String>(99),
+            );
+            if result == Ok(99) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "in-flight slots never drained after releasing workers"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 }
 
@@ -369,16 +515,27 @@ pub fn attempt_self_heal(app: &tauri::AppHandle, _reason: &str) {
 /// survives restarts; one repair attempt per cooldown per MACHINE, period.
 /// Manual (Settings button) bypasses it — an explicit click.
 fn repair_cooldown_active() -> bool {
+    repair_cooldown_active_at(&crate::paths::data_dir().join("grant-repair-last"))
+}
+
+fn stamp_repair_cooldown() {
+    stamp_repair_cooldown_at(&crate::paths::data_dir().join("grant-repair-last"));
+}
+
+/// Path-parameterised helper so the cooldown logic is unit-testable without
+/// touching the real data dir. The zero-arg wrappers above are the only
+/// production call sites — `attempt_grant_repair` is unchanged.
+fn repair_cooldown_active_at(path: &std::path::Path) -> bool {
     const COOLDOWN: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
-    std::fs::metadata(crate::paths::data_dir().join("grant-repair-last"))
+    std::fs::metadata(path)
         .ok()
         .and_then(|m| m.modified().ok())
         .and_then(|t| t.elapsed().ok())
         .is_some_and(|elapsed| elapsed < COOLDOWN)
 }
 
-fn stamp_repair_cooldown() {
-    let _ = crate::paths::atomic_write(&crate::paths::data_dir().join("grant-repair-last"), b"");
+fn stamp_repair_cooldown_at(path: &std::path::Path) {
+    let _ = crate::paths::atomic_write(path, b"");
 }
 
 /// Destroy + recreate this app's Calendar TCC record — the cure for the
