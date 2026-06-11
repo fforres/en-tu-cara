@@ -290,6 +290,51 @@ fn test_access_override() -> Option<(crate::access::AuthKind, crate::access::Fet
     })
 }
 
+/// Last-good event snapshot for the ALARM path — the final line of defense for
+/// the prime directive. The popover has always preserved last-known events on a
+/// failed read; the scheduler did NOT (a failed read fed compute_actions an
+/// empty list), so during an access-loss episode alarms silently starved — on
+/// the 2026-06-10 wedged machine, reads died 4m31s after every launch and every
+/// meeting after that would have fired nothing. Serving the snapshot keeps
+/// alerts armed through the episode, while the access machine (which still sees
+/// the Failed outcome) shouts and repairs in parallel.
+///
+/// TTL = the fetch window's forward reach (2 days): a snapshot can't usefully
+/// promise more than it fetched. The known staleness trade — a meeting
+/// deleted/moved AFTER the snapshot still alerts at its old time — is accepted:
+/// a loud false alarm over a silent miss, and the tray/banner already say
+/// events may be stale. Pure (clock injected) + tested.
+struct SnapshotCache {
+    events: Vec<AlarmEvent>,
+    fetched_at: Option<DateTime<Utc>>,
+}
+
+impl SnapshotCache {
+    const TTL_SECS: i64 = 48 * 3600;
+
+    const fn new() -> Self {
+        Self { events: Vec::new(), fetched_at: None }
+    }
+
+    fn store(&mut self, events: &[AlarmEvent], now: DateTime<Utc>) {
+        self.events = events.to_vec();
+        self.fetched_at = Some(now);
+    }
+
+    /// What to serve when the live read failed: `Some((events, age_secs))`
+    /// while a snapshot exists and is fresh enough to trust, else `None`
+    /// (never taken a good read, or the snapshot outlived its window).
+    fn serve(&self, now: DateTime<Utc>) -> Option<(Vec<AlarmEvent>, i64)> {
+        let age = (now - self.fetched_at?).num_seconds();
+        (age <= Self::TTL_SECS).then(|| (self.events.clone(), age))
+    }
+}
+
+static SNAPSHOT: Mutex<SnapshotCache> = Mutex::new(SnapshotCache::new());
+
+/// Edge latch so "serving from snapshot" logs once per episode, not per tick.
+static SERVING_SNAPSHOT: Mutex<bool> = Mutex::new(false);
+
 fn upcoming_alarm_events(
     settings: &crate::settings::Settings,
 ) -> (Vec<AlarmEvent>, Option<crate::access::FetchOutcome>) {
@@ -308,37 +353,56 @@ fn upcoming_alarm_events(
     // can't clip the next 24h); over-fetching is free, compute_actions filters by
     // time.
     let events = crate::calendar::active_events(&settings.enabled_calendar_ids, 1, 2);
-    let outcome = if events.is_ok() {
-        crate::access::FetchOutcome::Ok
-    } else {
-        crate::access::FetchOutcome::Failed
-    };
-    if let Err(ref e) = events {
-        // A read failing here means the alarm pipeline is starved — record it
-        // (reason only; no event content is involved in a failed read).
-        crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
+    let now = crate::testmode::clock::now();
+    match events {
+        Ok(events) => {
+            let parsed: Vec<AlarmEvent> = events
+                .into_iter()
+                .filter_map(|e| {
+                    Some(AlarmEvent {
+                        start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
+                        end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
+                        has_link: crate::calendar::has_meeting_link(
+                            e.url.as_deref(),
+                            e.location.as_deref(),
+                            e.notes.as_deref(),
+                        ),
+                        occurrence_key: e.occurrence_key,
+                        title: e.title,
+                        all_day: e.all_day,
+                        status: e.status,
+                        my_rsvp: e.my_rsvp,
+                    })
+                })
+                .collect();
+            lock_resilient(&SNAPSHOT).store(&parsed, now);
+            if std::mem::replace(&mut *lock_resilient(&SERVING_SNAPSHOT), false) {
+                log::info!("calendar reads recovered — back to live events (snapshot retired)");
+            }
+            (parsed, Some(crate::access::FetchOutcome::Ok))
+        }
+        Err(e) => {
+            // Reads are failing — the access machine (fed Failed below) owns the
+            // loud surfaces + repair. The ALARM path must not starve meanwhile:
+            // serve the last good snapshot while it's within its window.
+            crate::telemetry::record("calendar_sync_failed", serde_json::json!({ "reason": e }));
+            let served = lock_resilient(&SNAPSHOT).serve(now);
+            let events = match served {
+                Some((events, age_secs)) => {
+                    if !std::mem::replace(&mut *lock_resilient(&SERVING_SNAPSHOT), true) {
+                        log::warn!(
+                            "calendar read failed — serving {} event(s) from the last good \
+                             snapshot ({age_secs}s old); alerts stay armed while access heals",
+                            events.len()
+                        );
+                    }
+                    events
+                }
+                None => Vec::new(),
+            };
+            (events, Some(crate::access::FetchOutcome::Failed))
+        }
     }
-    let parsed = events
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|e| {
-            Some(AlarmEvent {
-                start: DateTime::parse_from_rfc3339(&e.start).ok()?.with_timezone(&Utc),
-                end: DateTime::parse_from_rfc3339(&e.end).ok()?.with_timezone(&Utc),
-                has_link: crate::calendar::has_meeting_link(
-                    e.url.as_deref(),
-                    e.location.as_deref(),
-                    e.notes.as_deref(),
-                ),
-                occurrence_key: e.occurrence_key,
-                title: e.title,
-                all_day: e.all_day,
-                status: e.status,
-                my_rsvp: e.my_rsvp,
-            })
-        })
-        .collect();
-    (parsed, Some(outcome))
 }
 
 /// Evaluate calendar-access health for one real read and act on any transition.
@@ -866,6 +930,57 @@ pub fn maybe_run_fire_spike(app: &tauri::AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snap_event(key: &str) -> AlarmEvent {
+        let start = DateTime::parse_from_rfc3339("2026-06-10T10:00:00Z").unwrap().with_timezone(&Utc);
+        AlarmEvent {
+            occurrence_key: key.into(),
+            title: "t".into(),
+            start,
+            end: start + ChronoDuration::seconds(900),
+            all_day: false,
+            status: "confirmed".into(),
+            my_rsvp: None,
+            has_link: true,
+        }
+    }
+
+    fn at(rfc3339: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(rfc3339).unwrap().with_timezone(&Utc)
+    }
+
+    #[test]
+    fn snapshot_serves_last_good_events_while_fresh() {
+        // The prime-directive case: reads die mid-episode (the 4m31s wedge) —
+        // the alarm path must keep the last good read, not starve.
+        let mut s = SnapshotCache::new();
+        assert!(s.serve(at("2026-06-10T09:00:00Z")).is_none(), "no good read yet → nothing");
+        s.store(&[snap_event("a"), snap_event("b")], at("2026-06-10T09:00:00Z"));
+        let (events, age) = s.serve(at("2026-06-10T09:05:00Z")).expect("fresh snapshot serves");
+        assert_eq!(events.len(), 2);
+        assert_eq!(age, 300);
+    }
+
+    #[test]
+    fn snapshot_expires_past_its_fetch_window() {
+        // A snapshot only fetched +2 days of events — past 48h it can't promise
+        // coverage and serving it would feign health. Cut it off.
+        let mut s = SnapshotCache::new();
+        s.store(&[snap_event("a")], at("2026-06-10T09:00:00Z"));
+        assert!(s.serve(at("2026-06-12T09:00:00Z")).is_some(), "exactly 48h still serves");
+        assert!(s.serve(at("2026-06-12T09:00:01Z")).is_none(), "past 48h expires");
+    }
+
+    #[test]
+    fn snapshot_store_replaces_wholesale() {
+        // Every good read replaces the snapshot (no merge): a meeting deleted
+        // upstream must vanish from the next snapshot, not linger.
+        let mut s = SnapshotCache::new();
+        s.store(&[snap_event("a"), snap_event("b")], at("2026-06-10T09:00:00Z"));
+        s.store(&[snap_event("c")], at("2026-06-10T09:01:00Z"));
+        let (events, _) = s.serve(at("2026-06-10T09:02:00Z")).unwrap();
+        assert_eq!(events.iter().map(|e| e.occurrence_key.as_str()).collect::<Vec<_>>(), ["c"]);
+    }
 
     #[test]
     fn presence_transition_only_logs_on_the_edge() {

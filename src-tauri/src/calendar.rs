@@ -181,6 +181,39 @@ mod tests {
     }
 
     #[test]
+    fn eventkit_with_timeout_passes_results_through() {
+        let t = std::time::Duration::from_millis(500);
+        assert_eq!(eventkit_with_timeout("x", t, || Ok::<_, String>(7)), Ok(7));
+        assert_eq!(eventkit_with_timeout("x", t, || Err::<i32, _>("nope".into())), Err("nope".to_string()));
+    }
+
+    #[test]
+    fn eventkit_with_timeout_turns_a_blocked_read_into_an_err() {
+        // The live incident: a wedged calendar daemon BLOCKS the read instead of
+        // erroring — on the main thread that beach-balled the whole UI and froze
+        // the alarm loop. The wrapper must convert "no answer" into a plain Err
+        // the existing failure paths (snapshot, preserve-on-failure) handle.
+        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(20), || {
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            Ok::<_, String>(1)
+        });
+        let err = result.unwrap_err();
+        assert!(err.contains("did not answer"), "got: {err}");
+    }
+
+    #[test]
+    fn eventkit_with_timeout_contains_a_worker_panic_as_err() {
+        // Belt over guard_eventkit's suspenders: a panicking worker drops the
+        // channel — the caller must see an Err, never an unwind or a hang.
+        let result = eventkit_with_timeout("probe", std::time::Duration::from_millis(500), || {
+            panic!("unexpected NULL");
+            #[allow(unreachable_code)]
+            Ok::<i32, String>(0)
+        });
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn guard_eventkit_contains_a_panic_as_err() {
         // The whole point: an EventKit NULL-panic must become an Err, never an
         // unwind into the scheduler tick or a Tauri command handler.
@@ -560,6 +593,61 @@ pub fn preflight_calendar_access(app: tauri::AppHandle) {
     });
 }
 
+/// How long an EventKit read may run before we declare it wedged. Healthy reads
+/// measure 20–120ms on real data; the margin is for big multi-account syncs.
+/// Bounded so a wedged calendar daemon delays a scheduler tick (and thus an
+/// alarm) by at most this much, once per stranded worker.
+const EVENTKIT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Run an EventKit read on a DISPOSABLE worker thread with a hard timeout.
+///
+/// Live incident (2026-06-10, the wedged-TCC machine): EventKit calls under a
+/// mid-session grant flap didn't fail — they BLOCKED forever inside the daemon
+/// connection. `fetch_events` runs synchronously on the MAIN thread for webview
+/// IPC (tray popover, overlay mount), so one blocked read beach-balled the
+/// whole UI: the overlay rendered frosted glass with no content (its IPC pulls
+/// never answered), heartbeats stopped, and the scheduler — whose tick had hit
+/// the same block on its own thread — never fired the T-0 alarm. A timed-out
+/// read here becomes an ordinary `Err`: the popover preserves last-known
+/// events, the alarm path serves its snapshot, the access machine shouts.
+///
+/// The timed-out worker can't be killed — it stays blocked until the daemon
+/// answers or the process exits. `IN_FLIGHT` caps how many we'll strand (each
+/// holds one EKEventStore + thread stack); past the cap, reads fail fast
+/// without spawning. A worker that eventually completes releases its slot.
+/// Fresh-thread-per-read also means a fresh thread_local EKEventStore per read
+/// — the !Send invariant holds (gotcha #9), at a negligible per-read cost.
+fn eventkit_with_timeout<T: Send + 'static>(
+    what: &'static str,
+    timeout: std::time::Duration,
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+    const MAX_IN_FLIGHT: usize = 4;
+    if IN_FLIGHT.fetch_add(1, Ordering::SeqCst) >= MAX_IN_FLIGHT {
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+        return Err(format!(
+            "{what}: EventKit is unresponsive ({MAX_IN_FLIGHT} reads already stuck) — failing fast"
+        ));
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = f();
+        let _ = tx.send(result);
+        IN_FLIGHT.fetch_sub(1, Ordering::SeqCst);
+    });
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        // Timeout AND worker-panic (channel disconnect) both land here; the
+        // panic case is already contained by guard_eventkit inside `f`.
+        Err(_) => Err(format!(
+            "{what}: EventKit did not answer within {}ms — treating the read as failed",
+            timeout.as_millis()
+        )),
+    }
+}
+
 /// Run an EventKit query that may PANIC rather than error. `eventkit-rs` /
 /// `objc2-event-kit` panic when an EventKit call returns NULL — which happens
 /// when the process isn't truly calendar-authorized even though
@@ -604,13 +692,18 @@ pub fn list_calendars() -> Result<Vec<CalendarDto>, String> {
         log::warn!("list_calendars: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
-    let mgr = EventsManager::new();
-    let calendars = guard_eventkit("list_calendars", || mgr.list_calendars());
+    // Worker + timeout: this command runs on the MAIN thread (webview IPC) and
+    // a wedged daemon BLOCKS rather than errors — see eventkit_with_timeout.
+    let calendars = eventkit_with_timeout("list_calendars", EVENTKIT_READ_TIMEOUT, || {
+        let mgr = EventsManager::new();
+        let calendars = guard_eventkit("list_calendars", || mgr.list_calendars())?;
+        Ok(calendars.iter().map(calendar_dto).collect::<Vec<_>>())
+    });
     match &calendars {
         Ok(c) => log::debug!("list_calendars: {} calendars in {}ms", c.len(), t0.elapsed().as_millis()),
         Err(e) => log::warn!("list_calendars: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
-    Ok(calendars?.iter().map(calendar_dto).collect())
+    calendars
 }
 
 /// Best-effort, non-reversible identifier for the user's calendar "org": the
@@ -638,16 +731,29 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         log::debug!("fetch_events: not authorized (no request — avoids main-thread deadlock)");
         return Err("calendar access not granted".to_string());
     }
-    // Sync before reading so externally deleted/edited events don't linger.
-    // EVERY event read (popover and scheduler) goes through here via
-    // `active_events`, so this is the one sync point — callers must not sync
-    // again. Cheap: refreshSourcesIfNecessary is a no-op when nothing changed,
-    // reset is local.
-    sync_event_store();
-    let mgr = EventsManager::new();
-    let now = Local::now();
-    let events = guard_eventkit("fetch_events", || {
-        mgr.fetch_events(now - Duration::days(days_back), now + Duration::days(days_forward), None)
+    // Worker + timeout (eventkit_with_timeout): this command runs on the MAIN
+    // thread for webview IPC AND on the scheduler tick — a wedged daemon BLOCKS
+    // these calls rather than erroring, which beach-balled the UI and froze the
+    // alarm loop live (2026-06-10). Everything EventKit-touching goes inside
+    // the worker closure: the sync, the query, and the DTO mapping (EventItem
+    // isn't Send; EventDto is plain data).
+    let events = eventkit_with_timeout("fetch_events", EVENTKIT_READ_TIMEOUT, move || {
+        // Sync before reading so externally deleted/edited events don't linger.
+        // EVERY event read (popover and scheduler) goes through here via
+        // `active_events`, so this is the one sync point — callers must not
+        // sync again. Cheap: refreshSourcesIfNecessary is a no-op when nothing
+        // changed, reset is local.
+        sync_event_store();
+        let mgr = EventsManager::new();
+        let now = Local::now();
+        let events = guard_eventkit("fetch_events", || {
+            mgr.fetch_events(
+                now - Duration::days(days_back),
+                now + Duration::days(days_forward),
+                None,
+            )
+        })?;
+        Ok(events.iter().map(event_dto).collect::<Vec<_>>())
     });
     match &events {
         Ok(e) => log::debug!("fetch_events: {} raw events in {}ms", e.len(), t0.elapsed().as_millis()),
@@ -655,7 +761,7 @@ pub fn fetch_events(days_back: i64, days_forward: i64) -> Result<Vec<EventDto>, 
         // the loud edge signal). Kept in the local file for triage.
         Err(e) => log::debug!("fetch_events: failed in {}ms: {e}", t0.elapsed().as_millis()),
     }
-    Ok(dedup_events(events?.iter().map(event_dto).collect()))
+    Ok(dedup_events(events?))
 }
 
 /// Is an event's calendar enabled for alerts/listing? `None` enabled-set means
