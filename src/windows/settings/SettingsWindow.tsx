@@ -18,6 +18,9 @@ import { searchSettings } from "./fuzzy";
 import { THEMES } from "../overlay/themes";
 import { checkForUpdate, installAndRelaunch } from "../../lib/updater";
 import { REASON_FETCH_FAILED, type AccessStatePayload } from "../../lib/access";
+import { Markdown } from "../../lib/markdown";
+import { ChangelogViewer } from "./ChangelogViewer";
+import { css } from "./styles";
 import type { Update } from "@tauri-apps/plugin-updater";
 import { capture, initTelemetry, setTelemetryEnabled } from "../../telemetry";
 
@@ -27,11 +30,6 @@ interface CalendarInfo {
   account: string | null;
   color: [number, number, number, number] | null;
 }
-
-const css = {
-  hairline: "1px solid color-mix(in srgb, CanvasText 12%, transparent)",
-  secondary: "color-mix(in srgb, CanvasText 55%, transparent)",
-} as const;
 
 function Highlight({ text, ranges }: { text: string; ranges: Array<[number, number]> }) {
   if (!ranges.length) {
@@ -82,7 +80,7 @@ type CheckState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "uptodate" }
-  | { kind: "available"; version: string; update: Update }
+  | { kind: "available"; version: string; notes?: string; date?: string; update: Update }
   | { kind: "installing" }
   | { kind: "error" };
 
@@ -158,7 +156,13 @@ function VersionControl() {
     setState({ kind: "checking" });
     const result = await checkForUpdate();
     if (result.status === "available") {
-      setState({ kind: "available", version: result.version, update: result.update });
+      setState({
+        kind: "available",
+        version: result.version,
+        notes: result.notes,
+        date: result.date,
+        update: result.update,
+      });
     } else if (result.status === "none") {
       setState({ kind: "uptodate" });
     } else {
@@ -177,33 +181,58 @@ function VersionControl() {
 
   const busy = state.kind === "checking" || state.kind === "installing";
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
-      <span style={{ fontVariantNumeric: "tabular-nums" }}>v{__APP_VERSION__}</span>
-      {state.kind === "available" ? (
-        <button
-          onClick={() => void install(state.update)}
-          style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+    <span
+      style={{ display: "inline-flex", flexDirection: "column", alignItems: "flex-end", gap: 8 }}
+    >
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 10 }}>
+        <span style={{ fontVariantNumeric: "tabular-nums" }}>v{__APP_VERSION__}</span>
+        {state.kind === "available" ? (
+          <button
+            onClick={() => void install(state.update)}
+            style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+          >
+            Update to v{state.version} &amp; restart
+          </button>
+        ) : (
+          <button
+            onClick={() => void check()}
+            disabled={busy}
+            style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+          >
+            {state.kind === "checking"
+              ? "Checking…"
+              : state.kind === "installing"
+                ? "Installing…"
+                : "Check for Updates"}
+          </button>
+        )}
+        {state.kind === "uptodate" && (
+          <span style={{ color: css.secondary, fontSize: 12 }}>You're up to date</span>
+        )}
+        {state.kind === "error" && (
+          <span style={{ color: css.secondary, fontSize: 12 }}>Couldn't check</span>
+        )}
+      </span>
+      {/* What's actually changing in the available update — straight from the
+          incoming release's notes (latest.json body), so the user sees it
+          BEFORE relaunching into the new version. */}
+      {state.kind === "available" && state.notes?.trim() && (
+        <div
+          style={{
+            fontSize: 12,
+            lineHeight: 1.45,
+            textAlign: "left",
+            background: "color-mix(in srgb, CanvasText 5%, Canvas)",
+            border: css.hairline,
+            borderRadius: 8,
+            padding: "8px 12px",
+            maxHeight: 220,
+            overflowY: "auto",
+          }}
         >
-          Update to v{state.version} &amp; restart
-        </button>
-      ) : (
-        <button
-          onClick={() => void check()}
-          disabled={busy}
-          style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
-        >
-          {state.kind === "checking"
-            ? "Checking…"
-            : state.kind === "installing"
-              ? "Installing…"
-              : "Check for Updates"}
-        </button>
-      )}
-      {state.kind === "uptodate" && (
-        <span style={{ color: css.secondary, fontSize: 12 }}>You're up to date</span>
-      )}
-      {state.kind === "error" && (
-        <span style={{ color: css.secondary, fontSize: 12 }}>Couldn't check</span>
+          <div style={{ fontWeight: 600, marginBottom: 4 }}>What's new in v{state.version}</div>
+          <Markdown text={state.notes} />
+        </div>
       )}
     </span>
   );
@@ -557,6 +586,9 @@ function ControlView({
     }
     case "version": {
       return <VersionControl />;
+    }
+    case "changelog": {
+      return <ChangelogViewer />;
     }
     case "note": {
       // Description-only row (the blurb lives in def.description).

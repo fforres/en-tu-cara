@@ -9,7 +9,9 @@ update themselves.
 that version changes on `main` — nothing else.** Ordinary merges (that don't
 touch `release.json`) never publish anything, and CI never guesses a version
 number: you write it. The diff between two version tags is exactly "what shipped
-in this release," and `release.json`'s `notes` field becomes the release body.
+in this release." The release **body** comes from `changelog/v<version>.md` (the
+in-code changelog — see `changelog/README.md`), falling back to
+`release.json`'s `notes` field if that file is absent.
 
 ## TL;DR — cut a release
 
@@ -41,7 +43,7 @@ pnpm release minor                       (local — scripts/release.mjs)
 .github/workflows/release.yml  on  macos-14   (build, reusable)
   ├─ tauri-apps/tauri-action builds  --target universal-apple-darwin
   ├─ signs the updater artifact with TAURI_SIGNING_PRIVATE_KEY (minisign)
-  ├─ creates the GitHub Release (body = release.json notes)
+  ├─ creates the GitHub Release (body = changelog/v<version>.md)
   └─ uploads:  En Tu Cara_0.2.0_universal.dmg
                En Tu Cara.app.tar.gz  (+ .sig)
                latest.json            ← the updater manifest
@@ -100,14 +102,14 @@ Gatekeeper does not:
   `signingIdentity` stays `"-"` in tauri.conf (so LOCAL `pnpm tauri build` stays
   ad-hoc + frictionless); `APPLE_SIGNING_IDENTITY` overrides it in CI.
 
-  | Secret                       | What                                                  |
-  | ---------------------------- | ----------------------------------------------------- |
-  | `APPLE_CERTIFICATE`          | base64 of your Developer ID `.p12`                    |
-  | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password                                   |
+  | Secret                       | What                                                                                                                                            |
+  | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+  | `APPLE_CERTIFICATE`          | base64 of your Developer ID `.p12`                                                                                                              |
+  | `APPLE_CERTIFICATE_PASSWORD` | the `.p12` password                                                                                                                             |
   | `APPLE_SIGNING_IDENTITY`     | exact Keychain identity name, `Developer ID Application: <Name> (<TEAM_ID>)` — copy it verbatim from `security find-identity -v -p codesigning` |
-  | `APPLE_ID`                   | your Apple ID email                                   |
-  | `APPLE_PASSWORD`             | an app-specific password (appleid.apple.com)          |
-  | `APPLE_TEAM_ID`              | your 10-char Team ID (Apple Developer → Membership)   |
+  | `APPLE_ID`                   | your Apple ID email                                                                                                                             |
+  | `APPLE_PASSWORD`             | an app-specific password (appleid.apple.com)                                                                                                    |
+  | `APPLE_TEAM_ID`              | your 10-char Team ID (Apple Developer → Membership)                                                                                             |
 
   Set with `gh secret set APPLE_CERTIFICATE < cert.b64`, etc. ⚠️ All six must
   exist before the next release is cut — an empty `APPLE_CERTIFICATE` fails the

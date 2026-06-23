@@ -271,6 +271,19 @@ describe("SettingsWindow", () => {
     });
   });
 
+  it("About tab lists the release history and expands a version's notes", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "About" }));
+    // Newest backfilled version is present as a collapsible header.
+    const header = await screen.findByRole("button", { name: /v0\.9\.0/ });
+    expect(header).toHaveAttribute("aria-expanded", "false");
+    // A body-only phrase (not the title) is hidden until expanded, then revealed.
+    expect(screen.queryByText(/double takeovers/i)).not.toBeInTheDocument();
+    fireEvent.click(header);
+    expect(header).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText(/double takeovers/i)).toBeInTheDocument();
+  });
+
   it("changing lead minutes clamps to range and persists", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Alerts" }));

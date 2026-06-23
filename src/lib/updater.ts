@@ -67,17 +67,28 @@ export async function notifyIfUpdated(): Promise<void> {
 
 export type UpdateOutcome =
   | { status: "none" }
-  | { status: "available"; version: string; update: Update }
+  | { status: "available"; version: string; notes?: string; date?: string; update: Update }
   | { status: "error"; error: unknown };
 
-/** Check for an update without installing. Returns the handle if one exists. */
+/**
+ * Check for an update without installing. Returns the handle if one exists, plus
+ * the incoming version's release notes (`update.body`, from latest.json — which
+ * tauri-action fills from the GitHub release body = release.json's notes) and
+ * date, so the UI can show what's actually changing before the user updates.
+ */
 export async function checkForUpdate(): Promise<UpdateOutcome> {
   try {
     const update = await check();
     if (!update) {
       return { status: "none" };
     }
-    return { status: "available", version: update.version, update };
+    return {
+      status: "available",
+      version: update.version,
+      notes: update.body,
+      date: update.date,
+      update,
+    };
   } catch (error) {
     return { status: "error", error };
   }
