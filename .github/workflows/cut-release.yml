@@ -84,25 +84,13 @@ jobs:
             echo "tag=$TAG"
             # Unlikely-to-collide heredoc delimiter (notes are author-controlled,
             # but a fixed common token like EOF could appear in release notes).
-            # The release body is `changelog/v<version>.md`'s body (the in-code
-            # changelog is the source of truth — see changelog/README.md), with
-            # release.json.notes as a fallback so an un-migrated bump still works.
+            # The body is changelog/v<version>.md (the in-code changelog is the
+            # source of truth — see changelog/README.md), with release.json.notes
+            # as a fallback; scripts/release-notes.mjs handles both. It is a file,
+            # not an inline node -e, because shell quoting kept mauling the inline
+            # version (a stray apostrophe in a JS comment broke the gate).
             echo "body<<__ETC_RELEASE_NOTES_EOF__"
-            node -e '
-              const fs = require("fs");
-              const v = require("./release.json").version;
-              let out = "";
-              try {
-                const raw = fs.readFileSync(`./changelog/v${v}.md`, "utf8").replace(/\r\n/g, "\n");
-                const m = /^---\n[\s\S]*?\n---\n?/.exec(raw);
-                out = (m ? raw.slice(m[0].length) : raw).trim();
-              } catch {}
-              if (!out) { out = require("./release.json").notes || ""; }
-              // console.log adds the trailing newline the heredoc needs: without
-              // it the body's last line glues to the closing delimiter and the
-              // GITHUB_OUTPUT parse fails ("Matching delimiter not found").
-              console.log(out);
-            '
+            node scripts/release-notes.mjs
             echo "__ETC_RELEASE_NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
 
