@@ -140,6 +140,21 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
     }
   });
 
+  it("scrolls overflowing content with the scrollbar hidden (no clipping)", async () => {
+    // Regression: with many/large cards the content overflowed the screen and was
+    // clipped (flex-centering made the top unreachable). The takeover must be a
+    // scroll container with the scrollbar hidden (trackpad/wheel still scrolls).
+    const { container } = render(<OverlayAlert />);
+    await screen.findByText("Standup");
+    const main = container.querySelector("main");
+    expect(main).not.toBeNull();
+    expect(main!.style.overflowY).toBe("auto");
+    // scrollbarWidth:none (Firefox) + the .overlay-scroll ::-webkit-scrollbar rule
+    // (WebKit, the takeover's engine) keep the bar hidden.
+    expect(main!.style.scrollbarWidth).toBe("none");
+    expect(main!.className).toContain("overlay-scroll");
+  });
+
   it("re-lands focus on Dismiss when the card set swaps without changing count", async () => {
     render(<OverlayAlert />);
     await screen.findByText("Standup");
@@ -170,5 +185,114 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
       expect(focused?.getAttributeNames?.()).toContain("data-dismiss");
       expect(document.body.contains(focused)).toBe(true);
     });
+  });
+});
+
+describe("OverlayAlert — calendar origins (where the event came from)", () => {
+  // An event carrying the calendars it was deduped from, matched to the alarm by
+  // occurrence_key. `account` lives on the calendar (resolved via list_calendars).
+  const eventOn = (calendars: { calendar_id: string; calendar_title: string }[]) => ({
+    id: "EK",
+    occurrence_key: ALARM_A.occurrence_key,
+    title: ALARM_A.title,
+    start: null,
+    end: null,
+    all_day: false,
+    status: "confirmed",
+    my_rsvp: "accepted",
+    is_recurring_occurrence: false,
+    calendar_title: calendars[0]?.calendar_title ?? null,
+    calendar_id: calendars[0]?.calendar_id ?? null,
+    url: null,
+    location: null,
+    notes: null,
+    calendars,
+  });
+
+  const mockBackend = (
+    calendars: { calendar_id: string; calendar_title: string }[],
+    calendarList: { id: string; account: string | null }[],
+  ) => {
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "get_active_alarms":
+          return Promise.resolve([ALARM_A]);
+        case "fetch_events":
+          return Promise.resolve([eventOn(calendars)]);
+        case "list_calendars":
+          return Promise.resolve(calendarList);
+        case "get_settings":
+          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+  };
+
+  it("lists each distinct synced account for a genuine cross-account duplicate", async () => {
+    mockBackend(
+      [
+        { calendar_id: "g", calendar_title: "FELIPE TORRES — GMAIL" },
+        { calendar_id: "s", calendar_title: "FELIPE TORRES — GMAIL" },
+        { calendar_id: "j", calendar_title: "FELIPE TORRES — GMAIL" },
+      ],
+      [
+        { id: "g", account: "Google" },
+        { id: "s", account: "felipe@skyward.ai" },
+        { id: "j", account: "felipe@jsconf.cl" },
+      ],
+    );
+    render(<OverlayAlert />);
+    expect(await screen.findByText("Calendar origins")).toBeInTheDocument(); // plural
+    expect(screen.getByText("Google")).toBeInTheDocument();
+    expect(screen.getByText("felipe@skyward.ai")).toBeInTheDocument();
+    expect(screen.getByText("felipe@jsconf.cl")).toBeInTheDocument();
+  });
+
+  it("collapses colleague-calendar duplicates that live under ONE account to a single origin", async () => {
+    // The user's own calendar + a subscribed colleague's calendar (titled by the
+    // colleague's email) — both under felipe@skyward.ai. Account-level dedup must
+    // show ONE origin, not surface the colleague's email as if it were a second
+    // place (that was the bug: it read like an invitee list).
+    mockBackend(
+      [
+        { calendar_id: "me", calendar_title: "felipe@skyward.ai" },
+        { calendar_id: "israel", calendar_title: "israel@skyward.ai" },
+      ],
+      [
+        { id: "me", account: "felipe@skyward.ai" },
+        { id: "israel", account: "felipe@skyward.ai" },
+      ],
+    );
+    render(<OverlayAlert />);
+    expect(await screen.findByText("Calendar origin")).toBeInTheDocument(); // singular
+    expect(screen.getByText("felipe@skyward.ai")).toBeInTheDocument();
+    // The colleague's calendar email must NOT appear as a separate origin.
+    expect(screen.queryByText("israel@skyward.ai")).not.toBeInTheDocument();
+  });
+
+  it("falls back to the calendar title when accounts can't resolve, never blocking the alert", async () => {
+    // list_calendars failing must not block the alert — accounts can't resolve, so
+    // we fall back to the calendar title rather than dropping the row.
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "get_active_alarms":
+          return Promise.resolve([ALARM_A]);
+        case "fetch_events":
+          return Promise.resolve([eventOn([{ calendar_id: "x", calendar_title: "X" }])]);
+        case "list_calendars":
+          return Promise.reject(new Error("blip"));
+        case "get_settings":
+          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<OverlayAlert />);
+    await screen.findByText("Standup");
+    // With no account resolved, fall back to the calendar title (still one origin),
+    // and the alert itself is unaffected.
+    expect(screen.getByText("Calendar origin")).toBeInTheDocument();
+    expect(screen.getByText("X")).toBeInTheDocument();
   });
 });

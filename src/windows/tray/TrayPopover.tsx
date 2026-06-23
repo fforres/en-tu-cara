@@ -16,6 +16,13 @@ import {
 } from "../../lib/classify";
 import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 import { REASON_FETCH_FAILED, type AccessStatePayload } from "../../lib/access";
+import { mockPopoverData } from "./preview-data";
+
+// DEV preview window (ENTUCARA_PREVIEW=popover, see src-tauri/src/lib.rs): the
+// popover UI rendered in a normal resizable window seeded with mock data, so the
+// list, cross-account dedup display, and scrolling can be checked without real
+// calendar access.
+const PREVIEW = new URLSearchParams(window.location.search).get("preview") === "1";
 
 export interface UiEvent {
   /** EKEvent identifier (event.eventIdentifier) — used for the ical:// deep-link. */
@@ -33,6 +40,16 @@ export interface UiEvent {
   url: string | null;
   location: string | null;
   notes: string | null;
+  /** Every distinct calendar this (possibly deduped) meeting appears on. Length 1
+   *  for a normal event; >1 when the SAME meeting lives in multiple accounts (e.g.
+   *  a business event mirrored into a personal Gmail) — the backend collapses them
+   *  to one row and we list the accounts below the event. */
+  calendars: EventCalendarRef[];
+}
+
+interface EventCalendarRef {
+  calendar_id: string | null;
+  calendar_title: string | null;
 }
 
 interface CalendarInfo {
@@ -100,7 +117,9 @@ function Pie({ fraction }: { fraction: number }) {
 
 // Calendar origin: the account (email) the calendar lives under, then the
 // sub-calendar's name — e.g. "felipe@skyward.ai · Team Events". Deduped + empties
-// dropped so a single-name account doesn't read "Work · Work".
+// dropped so a single-name account doesn't read "Work · Work". Just the event's
+// own primary calendar — the "where it came from across accounts" view lives on
+// the takeover (OverlayAlert), not in this list.
 function calendarOrigin(event: UiEvent, calendar?: CalendarInfo): string {
   return [calendar?.account, calendar?.title ?? event.calendar_title]
     .filter((s): s is string => Boolean(s))
@@ -310,6 +329,14 @@ export function TrayPopover() {
 
   const refreshingRef = useRef(false);
   const refresh = useCallback(async () => {
+    if (PREVIEW) {
+      const { events: evs, calendars: cals } = mockPopoverData(Date.now());
+      setEvents(evs);
+      setCalendars(new Map(cals.map((c) => [c.id, c])));
+      setPaused(false);
+      setIgnored(new Set());
+      return;
+    }
     // Coalesce overlapping refreshes: if one is already in flight (e.g. a 30s
     // tick lands while the on-show refresh is still awaiting EventKit), skip
     // rather than pile a second batch of fetch_events onto the command pool.

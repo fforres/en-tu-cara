@@ -28,6 +28,14 @@ pub struct CalendarDto {
     pub is_subscribed: bool,
 }
 
+/// One calendar a (possibly merged) event lives on. Carried per-event so the UI
+/// can name every account a deduped meeting is present in.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct EventCalendarRef {
+    pub calendar_id: Option<String>,
+    pub calendar_title: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EventDto {
     /// EKEvent identifier — NOT unique per occurrence; see `occurrence_key`.
@@ -57,6 +65,12 @@ pub struct EventDto {
     pub availability: String,
     pub timezone: Option<String>,
     pub attendee_count: usize,
+    /// Every distinct calendar this meeting appears on. Length 1 for a normal
+    /// event; >1 when the SAME meeting exists in multiple accounts/calendars
+    /// (e.g. a business event mirrored into a personal Gmail) and `dedup_events`
+    /// collapsed them. The UI lists these accounts under the event so the merge
+    /// is visible, not hidden.
+    pub calendars: Vec<EventCalendarRef>,
 }
 
 fn calendar_dto(c: &CalendarInfo) -> CalendarDto {
@@ -102,32 +116,65 @@ fn event_dto(e: &EventItem) -> EventDto {
         availability: format!("{:?}", e.availability).to_lowercase(),
         timezone: e.timezone.clone(),
         attendee_count: e.attendees.len(),
+        calendars: vec![EventCalendarRef {
+            calendar_id: e.calendar_id.clone(),
+            calendar_title: e.calendar_title.clone(),
+        }],
     }
 }
 
-/// Collapse multi-calendar duplicates of the same real-world meeting.
+/// Collapse duplicates of the same real-world meeting across calendars/accounts.
 ///
-/// CP1a finding (2026-06-05): the same Google event surfaces once per calendar that
-/// can see it (subscribed colleague calendars, mirrored Gmail accounts) with an
-/// IDENTICAL `(identifier @ start)` key — 45 of 209 events duplicated on real data.
-/// One meeting must alert once, so we dedup by occurrence_key and keep the row most
-/// likely to be the user's own copy: has my_rsvp (their attendance) > is_organizer >
-/// first seen. The tray shows the deduped list too (reference popover has one row
-/// per meeting).
+/// Two distinct duplication shapes, both collapsed here so a meeting alerts ONCE:
+///   1. Same Google event seen through several subscribed/mirrored calendars —
+///      IDENTICAL `(identifier @ start)` (CP1a 2026-06-05: 45 of 209 real events).
+///   2. The SAME meeting living as SEPARATE events in two accounts (e.g. a
+///      business calendar shared into a personal Gmail) — DIFFERENT identifiers,
+///      so case 1's key misses them, but identical title + start + end.
+///
+/// So we key on `(normalized title, start, end)`, which subsumes case 1 (a true
+/// duplicate shares all three) and catches case 2. Untitled holds fall back to
+/// `occurrence_key` so two blank events at the same time stay distinct rather than
+/// merging into one. We keep the row most likely to be the user's own copy — has
+/// my_rsvp (their attendance) > is_organizer > first seen — and accumulate EVERY
+/// contributing calendar onto the survivor's `calendars` (first-seen order) so the
+/// UI can name each account the meeting is on. The tray and the alarm scheduler
+/// both read the deduped list, so the list, the menu-bar title, and what fires
+/// can't disagree.
 pub fn dedup_events(events: Vec<EventDto>) -> Vec<EventDto> {
+    fn merge_key(e: &EventDto) -> String {
+        let title = e.title.trim().to_lowercase();
+        if title.is_empty() {
+            e.occurrence_key.clone()
+        } else {
+            // \u{1f} (unit separator) can't appear in a title/timestamp, so it
+            // can't collide field boundaries.
+            format!("{title}\u{1f}{}\u{1f}{}", e.start, e.end)
+        }
+    }
+    let score = |e: &EventDto| (e.my_rsvp.is_some() as u8) * 2 + e.is_organizer as u8;
     let mut best: std::collections::HashMap<String, EventDto> = Default::default();
     let mut order: Vec<String> = Vec::new();
-    let score = |e: &EventDto| (e.my_rsvp.is_some() as u8) * 2 + e.is_organizer as u8;
     for e in events {
-        match best.get(&e.occurrence_key) {
-            None => {
-                order.push(e.occurrence_key.clone());
-                best.insert(e.occurrence_key.clone(), e);
+        let k = merge_key(&e);
+        let Some(existing) = best.get_mut(&k) else {
+            order.push(k.clone());
+            best.insert(k, e);
+            continue;
+        };
+        // Whichever copy wins, the survivor must list every calendar the meeting
+        // appears on — so merge calendars in first (dedup, first-seen order).
+        for c in &e.calendars {
+            if !existing.calendars.contains(c) {
+                existing.calendars.push(c.clone());
             }
-            Some(existing) if score(&e) > score(existing) => {
-                best.insert(e.occurrence_key.clone(), e);
-            }
-            _ => {}
+        }
+        // Then, if this copy is the better representative, swap it in WITHOUT
+        // losing the merged calendar list (merging didn't change its score).
+        if score(&e) > score(existing) {
+            let cals = std::mem::take(&mut existing.calendars);
+            *existing = e;
+            existing.calendars = cals;
         }
     }
     order.into_iter().filter_map(|k| best.remove(&k)).collect()
@@ -137,16 +184,25 @@ pub fn dedup_events(events: Vec<EventDto>) -> Vec<EventDto> {
 mod tests {
     use super::*;
 
-    fn ev(key: &str, rsvp: Option<&str>, organizer: bool) -> EventDto {
+    /// A meeting `title` at `start`, living on calendar `cal`. occurrence_key is
+    /// derived per-calendar so two accounts get DISTINCT keys (the cross-account
+    /// case) — dedup must merge them on content, not key.
+    fn ev_on(
+        title: &str,
+        start: &str,
+        cal: &str,
+        rsvp: Option<&str>,
+        organizer: bool,
+    ) -> EventDto {
         EventDto {
-            id: "id".into(),
-            occurrence_key: key.into(),
-            title: "t".into(),
-            start: "2026-06-08T09:00:00-07:00".into(),
+            id: cal.into(),
+            occurrence_key: format!("({cal} @ {start})"),
+            title: title.into(),
+            start: start.into(),
             end: "2026-06-08T09:15:00-07:00".into(),
             all_day: false,
-            calendar_id: None,
-            calendar_title: None,
+            calendar_id: Some(cal.into()),
+            calendar_title: Some(cal.into()),
             notes: None,
             location: None,
             url: None,
@@ -159,6 +215,10 @@ mod tests {
             availability: "busy".into(),
             timezone: None,
             attendee_count: 0,
+            calendars: vec![EventCalendarRef {
+                calendar_id: Some(cal.into()),
+                calendar_title: Some(cal.into()),
+            }],
         }
     }
 
@@ -211,29 +271,56 @@ mod tests {
     }
 
     #[test]
-    fn dedup_prefers_row_with_my_rsvp() {
-        // CP1a real-data case: same meeting via a colleague's subscribed calendar
-        // (no rsvp) and via the user's own calendar (rsvp present).
+    fn dedup_merges_same_meeting_across_accounts_and_keeps_my_copy() {
+        // The cross-account case: "Standup" at t1 exists as SEPARATE events on the
+        // work and personal calendars (distinct occurrence keys). It must collapse
+        // to one row, keeping the copy the user RSVP'd to, while listing BOTH
+        // calendars so the UI can show every account it's on. A different meeting
+        // at the same time stays separate.
         let deduped = dedup_events(vec![
-            ev("(a @ t1)", None, false),
-            ev("(a @ t1)", Some("accepted"), false),
-            ev("(b @ t1)", None, true),
+            ev_on("Standup", "t1", "work", None, false),
+            ev_on("Standup", "t1", "personal", Some("accepted"), false),
+            ev_on("1:1", "t1", "work", None, true),
         ]);
         assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].title, "Standup");
         assert_eq!(deduped[0].my_rsvp.as_deref(), Some("accepted"));
+        let cals: Vec<_> = deduped[0]
+            .calendars
+            .iter()
+            .filter_map(|c| c.calendar_id.clone())
+            .collect();
+        assert_eq!(
+            cals,
+            vec!["work".to_string(), "personal".to_string()],
+            "survivor lists both calendars in first-seen order"
+        );
         assert!(deduped[1].is_organizer);
     }
 
     #[test]
-    fn dedup_keeps_first_seen_order_and_distinct_occurrences() {
+    fn dedup_is_case_insensitive_on_title_but_keeps_distinct_occurrences() {
         let deduped = dedup_events(vec![
-            ev("(a @ t1)", None, false),
-            ev("(a @ t2)", None, false), // same series, different occurrence — kept
-            ev("(a @ t1)", None, false), // duplicate — dropped
+            ev_on("Standup", "t1", "work", None, false),
+            ev_on("STANDUP", "t1", "personal", None, false), // same meeting, diff casing — merged
+            ev_on("Standup", "t2", "work", None, false),     // different time — kept
         ]);
         assert_eq!(deduped.len(), 2);
-        assert_eq!(deduped[0].occurrence_key, "(a @ t1)");
-        assert_eq!(deduped[1].occurrence_key, "(a @ t2)");
+        assert_eq!(deduped[0].start, "t1");
+        assert_eq!(deduped[0].calendars.len(), 2);
+        assert_eq!(deduped[1].start, "t2");
+    }
+
+    #[test]
+    fn dedup_does_not_merge_untitled_holds() {
+        // Two blank-title holds at the same time on different calendars are almost
+        // certainly different things — falling back to occurrence_key keeps them
+        // distinct rather than silently collapsing one away.
+        let deduped = dedup_events(vec![
+            ev_on("", "t1", "work", None, false),
+            ev_on("", "t1", "personal", None, false),
+        ]);
+        assert_eq!(deduped.len(), 2);
     }
 
     // Mutex serialising all calls to eventkit_with_timeout within the test

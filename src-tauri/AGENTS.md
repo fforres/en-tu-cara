@@ -34,6 +34,11 @@ Test/debug env vars (set on the packaged binary, `…/MacOS/en-tu-cara`):
 `ENTUCARA_SILENT=1` (no sound — use in every scripted run) ·
 `ENTUCARA_SPIKE_OVERLAY=<s>` · `ENTUCARA_SPIKE_REAL_E2E=<s>` (creates+deletes a
 REAL calendar event) · `ENTUCARA_OPEN_SETTINGS=<1|section>` · `ENTUCARA_SPIKE_DUMP=1` ·
+`ENTUCARA_PREVIEW=popover|overlay` (open that window's UI in a NORMAL resizable
+window seeded with MOCK data — `?preview=1` → src/windows/tray/preview-data.ts —
+to inspect the popover's list/scrolling OR the takeover's "Calendar origins"
+account list, with NO real calendar access or full-screen takeover; no TCC click
+needed) ·
 `ENTUCARA_TELEMETRY=on|off` (force/kill log+event shipping; default follows the
 Settings toggle, off in test mode unless `on`) ·
 `ENTUCARA_TEST_ACCESS='<reason>[,recover_after=<secs>]'` (test-mode only: FORCE
@@ -69,8 +74,15 @@ EventKit failures; `recover_after` flips it healthy after N secs).
    activation policy Regular↔Accessory (open_settings / on_window_event).
 7. Timer precision needs `NSActivityLatencyCritical` (windowed ≤120s before
    fire); `.userInitiated` alone does NOT defeat App Nap. Measured: 0–1ms on AC.
-8. Occurrence identity = `(event_id @ occurrence_start)`; the same meeting
-   appears once per subscribed calendar — `dedup_events` collapses by that key.
+8. Occurrence identity = `(event_id @ occurrence_start)` (fired-set/snooze/ignore
+   key). But `dedup_events` collapses on CONTENT — `(normalized title, start,
+   end)` — to catch BOTH the same event seen via many subscribed calendars (same
+   id) AND the same meeting living as SEPARATE events in two accounts (different
+   ids; e.g. a business calendar shared into a personal Gmail). It keeps the
+   user's own copy (my_rsvp > organizer > first) and accumulates every
+   contributing calendar onto the survivor's `EventDto.calendars` so the popover
+   can list each account. Untitled holds fall back to the occurrence key so blanks
+   don't merge. One meeting therefore alerts ONCE even across accounts.
 9. EKEventStore is `!Send` — `sync_event_store` uses a thread_local store, so it
    is safe from BOTH the scheduler tick and the main-thread `fetch_events`
    command (each thread gets its own instance; the store is never shared). It
