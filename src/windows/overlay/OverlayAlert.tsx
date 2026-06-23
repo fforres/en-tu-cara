@@ -9,7 +9,15 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { extractMeetingLink, isWebUrl } from "../../lib/meeting-links";
 import { resolveTheme, type Theme } from "./themes";
 import type { UiEvent } from "../tray/TrayPopover";
+import { accountsForEvent, type AccountInfo } from "../../lib/accounts";
 import { capture } from "../../telemetry";
+import { mockOverlayData } from "../tray/preview-data";
+
+// DEV preview (ENTUCARA_PREVIEW=overlay → ?preview=1): render the takeover in a
+// normal window seeded with mock alarms/events/calendars, so the layout and the
+// "Calendar origins" section can be checked WITHOUT triggering a real full-screen
+// takeover on the user's machine.
+const PREVIEW = new URLSearchParams(window.location.search).get("preview") === "1";
 
 interface AlarmPayload {
   occurrence_key: string;
@@ -18,6 +26,10 @@ interface AlarmPayload {
   title: string;
   start: string | null;
   end: string | null;
+}
+
+interface CalendarInfo extends AccountInfo {
+  id: string;
 }
 
 interface SettingsLite {
@@ -54,6 +66,7 @@ export function OverlayAlert() {
   const role = new URLSearchParams(window.location.search).get("role") ?? "main";
   const [alarms, setAlarms] = useState<AlarmPayload[]>([]);
   const [events, setEvents] = useState<UiEvent[]>([]);
+  const [calendars, setCalendars] = useState<Map<string, CalendarInfo>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(null));
   const [snoozes, setSnoozes] = useState<number[]>([1, 5]);
   const [now, setNow] = useState(() => new Date());
@@ -67,8 +80,22 @@ export function OverlayAlert() {
         const seen = new Set(prev.map((a) => `${a.occurrence_key}#${a.kind}`));
         return [...prev, ...incoming.filter((a) => !seen.has(`${a.occurrence_key}#${a.kind}`))];
       });
+    if (PREVIEW) {
+      const mock = mockOverlayData(Date.now());
+      setAlarms(mock.alarms);
+      setEvents(mock.events);
+      setCalendars(new Map(mock.calendars.map((c) => [c.id, c])));
+      const clock = setInterval(() => setNow(new Date()), 1000);
+      return () => clearInterval(clock);
+    }
     invoke<AlarmPayload[]>("get_active_alarms")
       .then(dedupAdd)
+      .catch(() => {});
+    // Accounts for the "Calendar origins" section resolve from the calendar list
+    // (account lives on the calendar, not the event). Best-effort: if this fails
+    // the section just doesn't render — it never blocks the alert.
+    invoke<CalendarInfo[]>("list_calendars")
+      .then((cals) => setCalendars(new Map(cals.map((c) => [c.id, c]))))
       .catch(() => {});
     const unlistenPromise = listen<AlarmPayload>("alarm-fired", (e) => dedupAdd([e.payload]));
     // After a per-occurrence dismiss/snooze the backend keeps the overlay open
@@ -123,9 +150,13 @@ export function OverlayAlert() {
     return alarms.map((alarm) => {
       const event = events.find((e) => e.occurrence_key === alarm.occurrence_key);
       const link = event ? extractMeetingLink(event) : null;
-      return { alarm, event, link };
+      // The synced accounts this meeting is present on (account-level, so a
+      // duplicate across subscribed colleague calendars under one account reads
+      // as one origin). Empty until the calendar list resolves.
+      const accounts = event ? accountsForEvent(event.calendars, calendars) : [];
+      return { alarm, event, link, accounts };
     });
-  }, [alarms, events]);
+  }, [alarms, events, calendars]);
 
   // Key the focus effect on the card IDENTITY signature, not the count: a swap
   // that keeps the count the same (one dismissed + one added in a single
@@ -169,132 +200,192 @@ export function OverlayAlert() {
   return (
     <main
       ref={containerRef}
+      // Scroll container: many/large cards (several overlapping meetings, the
+      // 3-account origins list) overflow the screen and were CLIPPED — and flex
+      // centering made the top unreachable. Scroll instead, with the scrollbar
+      // hidden (trackpad/wheel still scrolls) so the takeover stays clean.
+      className="overlay-scroll"
       style={{
         font: "17px system-ui, -apple-system, sans-serif",
         background: theme.backdrop,
         color: theme.text,
         height: "100%",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        flexDirection: "column",
-        gap: 20,
-        userSelect: "none",
+        overflowY: "auto",
+        scrollbarWidth: "none",
       }}
     >
-      <div style={{ fontSize: 64 }}>⏰</div>
+      <style>{`.overlay-scroll::-webkit-scrollbar{display:none}`}</style>
+      {/* min-height:100% centers the content when it's short, but lets it grow
+          and scroll from the TOP when it's tall (plain justify-content:center
+          would clip the top of overflowing content). */}
+      <div
+        style={{
+          minHeight: "100%",
+          boxSizing: "border-box",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "center",
+          flexDirection: "column",
+          gap: 20,
+          padding: "48px 24px",
+          userSelect: "none",
+        }}
+      >
+        <div style={{ fontSize: 64 }}>⏰</div>
 
-      {cards.length === 0 && (
-        <>
-          <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>
-          {/* Dismiss must ALWAYS exist (CP1b-human: "I couldn't close it"). No
+        {cards.length === 0 && (
+          <>
+            <h1 style={{ fontWeight: 600 }}>Meeting starting…</h1>
+            {/* Dismiss must ALWAYS exist (CP1b-human: "I couldn't close it"). No
               key → dismiss everything (the blunt escape hatch). */}
-          <button
-            data-dismiss
-            onClick={() => void invoke("dismiss_alarms").catch(() => {})}
-            style={secondaryButton}
-          >
-            Dismiss
-          </button>
-        </>
-      )}
-
-      {cards.map(({ alarm, link }) => (
-        <section
-          key={`${alarm.occurrence_key}#${alarm.kind}`}
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "center",
-            gap: 10,
-            padding: "24px 40px",
-            borderRadius: 14,
-            background: theme.cardBg,
-            maxWidth: 720,
-          }}
-        >
-          <h1 style={{ margin: 0, fontSize: 34, fontWeight: 700, textAlign: "center" }}>
-            {alarm.title || "Untitled event"}
-          </h1>
-          <div style={{ fontSize: 18, color: theme.textSecondary }}>{timeRange(alarm)}</div>
-          <div style={{ fontSize: 20, fontVariantNumeric: "tabular-nums" }}>
-            {countdownLabel(alarm, now)}
-          </div>
-
-          <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
-            {link && (
-              <button
-                onClick={async () => {
-                  const key = alarm.occurrence_key;
-                  // Join is the one action Rust can't observe (it opens a URL,
-                  // then dismisses). Record it here so we can tell joins apart
-                  // from plain dismissals.
-                  capture("alarm_joined");
-                  try {
-                    if (isWebUrl(link.url)) {
-                      await openUrl(link.url);
-                    }
-                  } catch {
-                    // Opening failed — still dismiss so the alert never sticks.
-                  } finally {
-                    void invoke("dismiss_alarms", { occurrenceKey: key }).catch(() => {});
-                  }
-                }}
-                style={{
-                  font: "inherit",
-                  fontWeight: 600,
-                  padding: "10px 28px",
-                  borderRadius: 8,
-                  border: "none",
-                  background: theme.accent,
-                  color: theme.accentText,
-                  cursor: "pointer",
-                }}
-              >
-                📹 Join
-              </button>
-            )}
             <button
               data-dismiss
-              onClick={() =>
-                void invoke("dismiss_alarms", { occurrenceKey: alarm.occurrence_key }).catch(
-                  () => {},
-                )
-              }
+              onClick={() => void invoke("dismiss_alarms").catch(() => {})}
               style={secondaryButton}
             >
               Dismiss
             </button>
-          </div>
+          </>
+        )}
 
-          <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-            {snoozes.map((m) => (
-              <button
-                key={m}
-                onClick={() =>
-                  void invoke("snooze_alarm", {
-                    occurrenceKey: alarm.occurrence_key,
-                    minutes: m,
-                  }).catch(() => {})
-                }
+        {cards.map(({ alarm, link, accounts }) => (
+          <section
+            key={`${alarm.occurrence_key}#${alarm.kind}`}
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: 10,
+              padding: "24px 40px",
+              borderRadius: 14,
+              background: theme.cardBg,
+              maxWidth: 720,
+            }}
+          >
+            <h1 style={{ margin: 0, fontSize: 34, fontWeight: 700, textAlign: "center" }}>
+              {alarm.title || "Untitled event"}
+            </h1>
+            <div style={{ fontSize: 18, color: theme.textSecondary }}>{timeRange(alarm)}</div>
+            <div style={{ fontSize: 20, fontVariantNumeric: "tabular-nums" }}>
+              {countdownLabel(alarm, now)}
+            </div>
+
+            {accounts.length > 0 && (
+              <div
                 style={{
-                  font: "inherit",
-                  fontSize: 13,
-                  padding: "5px 14px",
-                  borderRadius: 6,
-                  border: `1px solid ${theme.buttonBorder}`,
-                  background: "transparent",
-                  color: theme.text,
-                  opacity: 0.85,
-                  cursor: "pointer",
+                  display: "flex",
+                  flexDirection: "column",
+                  alignItems: "center",
+                  gap: 6,
+                  marginTop: 6,
                 }}
               >
-                Snooze {m} min
+                <div
+                  style={{
+                    fontSize: 12,
+                    letterSpacing: 0.8,
+                    textTransform: "uppercase",
+                    color: theme.textSecondary,
+                  }}
+                >
+                  {accounts.length > 1 ? "Calendar origins" : "Calendar origin"}
+                </div>
+                <div
+                  style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center" }}
+                >
+                  {accounts.map((account) => (
+                    <span
+                      key={account}
+                      style={{
+                        fontSize: 14,
+                        padding: "3px 12px",
+                        borderRadius: 999,
+                        border: `1px solid ${theme.buttonBorder}`,
+                        color: theme.text,
+                      }}
+                    >
+                      {account}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: 12, marginTop: 8 }}>
+              {link && (
+                <button
+                  onClick={async () => {
+                    const key = alarm.occurrence_key;
+                    // Join is the one action Rust can't observe (it opens a URL,
+                    // then dismisses). Record it here so we can tell joins apart
+                    // from plain dismissals.
+                    capture("alarm_joined");
+                    try {
+                      if (isWebUrl(link.url)) {
+                        await openUrl(link.url);
+                      }
+                    } catch {
+                      // Opening failed — still dismiss so the alert never sticks.
+                    } finally {
+                      void invoke("dismiss_alarms", { occurrenceKey: key }).catch(() => {});
+                    }
+                  }}
+                  style={{
+                    font: "inherit",
+                    fontWeight: 600,
+                    padding: "10px 28px",
+                    borderRadius: 8,
+                    border: "none",
+                    background: theme.accent,
+                    color: theme.accentText,
+                    cursor: "pointer",
+                  }}
+                >
+                  📹 Join
+                </button>
+              )}
+              <button
+                data-dismiss
+                onClick={() =>
+                  void invoke("dismiss_alarms", { occurrenceKey: alarm.occurrence_key }).catch(
+                    () => {},
+                  )
+                }
+                style={secondaryButton}
+              >
+                Dismiss
               </button>
-            ))}
-          </div>
-        </section>
-      ))}
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
+              {snoozes.map((m) => (
+                <button
+                  key={m}
+                  onClick={() =>
+                    void invoke("snooze_alarm", {
+                      occurrenceKey: alarm.occurrence_key,
+                      minutes: m,
+                    }).catch(() => {})
+                  }
+                  style={{
+                    font: "inherit",
+                    fontSize: 13,
+                    padding: "5px 14px",
+                    borderRadius: 6,
+                    border: `1px solid ${theme.buttonBorder}`,
+                    background: "transparent",
+                    color: theme.text,
+                    opacity: 0.85,
+                    cursor: "pointer",
+                  }}
+                >
+                  Snooze {m} min
+                </button>
+              ))}
+            </div>
+          </section>
+        ))}
+      </div>
     </main>
   );
 }

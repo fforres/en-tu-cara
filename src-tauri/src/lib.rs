@@ -223,6 +223,36 @@ pub fn run() {
                 });
             }
 
+            // DEV preview: ENTUCARA_PREVIEW=popover|overlay → open that window's UI
+            // in a normal resizable window seeded with mock data (cross-account
+            // dedup + the takeover's "Calendar origins", no real calendar access or
+            // full-screen takeover needed). Same post-setup-grace dispatch as
+            // ENTUCARA_OPEN_SETTINGS (window creation during setup is the known
+            // abort trap, gotcha #3).
+            if let Ok(kind) = std::env::var("ENTUCARA_PREVIEW") {
+                if kind == "popover" || kind == "overlay" {
+                    let handle = app.handle().clone();
+                    std::thread::spawn(move || {
+                        std::thread::sleep(std::time::Duration::from_secs(3));
+                        let h = handle.clone();
+                        let dispatched = handle.run_on_main_thread(move || {
+                            let r = if kind == "overlay" {
+                                tray::open_preview_overlay(h)
+                            } else {
+                                tray::open_preview_popover(h)
+                            };
+                            match r {
+                                Ok(()) => eprintln!("PREVIEW: {kind} window opened"),
+                                Err(e) => eprintln!("PREVIEW: ERR {e}"),
+                            }
+                        });
+                        if dispatched.is_err() {
+                            eprintln!("PREVIEW: main-thread dispatch failed");
+                        }
+                    });
+                }
+            }
+
             // Real-calendar e2e: ENTUCARA_SPIKE_REAL_E2E="<start_in_secs>".
             #[cfg(target_os = "macos")]
             calendar::maybe_run_real_e2e();

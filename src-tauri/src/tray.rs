@@ -113,6 +113,62 @@ pub fn open_settings_at(app: AppHandle, section: Option<&str>) -> Result<(), Str
     Ok(())
 }
 
+/// DEV preview window (ENTUCARA_PREVIEW=popover): the tray-popover UI rendered in
+/// a NORMAL, RESIZABLE, decorated window (not the borderless dismiss-on-blur
+/// NSPanel) and seeded with mock data (`?preview=1` → preview-data.ts). Lets us
+/// inspect the list, the cross-account dedup display, and scrolling at any window
+/// size WITHOUT real calendar access (the dev build's TCC grant needs a human
+/// click). Idempotent. Not wired into any user-facing surface.
+pub fn open_preview_popover(app: AppHandle) -> Result<(), String> {
+    const PREVIEW_LABEL: &str = "preview";
+    if let Some(existing) = app.get_webview_window(PREVIEW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        PREVIEW_LABEL,
+        tauri::WebviewUrl::App("index.html?window=popover&preview=1".into()),
+    )
+    .title("En Tu Cara — popover preview")
+    .inner_size(420.0, 640.0)
+    .min_inner_size(280.0, 320.0)
+    .resizable(true)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    present_window(&window);
+    Ok(())
+}
+
+/// DEV preview of the TAKEOVER (ENTUCARA_PREVIEW=overlay): the overlay alert UI in
+/// a NORMAL resizable window (`role=main&preview=1` → mock alarms/events/calendars)
+/// instead of a real full-screen takeover, so the layout and the "Calendar
+/// origins" section are inspectable without taking over the user's screen.
+pub fn open_preview_overlay(app: AppHandle) -> Result<(), String> {
+    const PREVIEW_LABEL: &str = "preview-overlay";
+    if let Some(existing) = app.get_webview_window(PREVIEW_LABEL) {
+        let _ = existing.show();
+        let _ = existing.set_focus();
+        return Ok(());
+    }
+    let window = tauri::WebviewWindowBuilder::new(
+        &app,
+        PREVIEW_LABEL,
+        tauri::WebviewUrl::App("index.html?window=overlay&role=main&preview=1".into()),
+    )
+    .title("En Tu Cara — takeover preview")
+    .inner_size(760.0, 640.0)
+    .min_inner_size(360.0, 360.0)
+    .resizable(true)
+    .visible(false)
+    .build()
+    .map_err(|e| e.to_string())?;
+    present_window(&window);
+    Ok(())
+}
+
 /// Open (or focus) the first-run onboarding window — a small, fixed-size themed
 /// window. Idempotent.
 fn open_onboarding(app: &AppHandle) -> Result<(), String> {

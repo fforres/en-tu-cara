@@ -35,6 +35,25 @@ function futureEvent(): UiEvent {
     url: WEB_EVENT,
     location: null,
     notes: `Join: ${ZOOM}`,
+    calendars: [{ calendar_id: "work", calendar_title: "Work" }],
+  };
+}
+
+// Same meeting present on two accounts (business + personal) — the deduped shape
+// the backend now returns: one row carrying both calendars.
+function dupedEvent(): UiEvent {
+  return {
+    ...futureEvent(),
+    title: "ADHD meds",
+    occurrence_key: "(adhd @ t1)",
+    calendar_id: "work",
+    calendar_title: "Felipe Torres Gmail",
+    url: null,
+    notes: null,
+    calendars: [
+      { calendar_id: "work", calendar_title: "Felipe Torres Gmail" },
+      { calendar_id: "personal", calendar_title: "Felipe Torres Gmail" },
+    ],
   };
 }
 
@@ -419,6 +438,36 @@ describe("TrayPopover", () => {
     // Recovery edge: state=ok must remove the banner unconditionally.
     listeners.get("access-state-changed")?.({ payload: { state: "ok" } });
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  // --- Cross-account dedup: the tray shows ONE row (the breakdown of accounts
+  // lives on the takeover, not here) ---
+
+  it("a deduped cross-account meeting shows as a single row with one origin line", async () => {
+    invokeMock.mockImplementation((cmd: string) => {
+      switch (cmd) {
+        case "refresh_popover":
+          return Promise.resolve([dupedEvent()]);
+        case "list_calendars":
+          return Promise.resolve([
+            { id: "work", title: "Felipe Torres Gmail", account: "felipe@skyward.ai", color: null },
+            { id: "personal", title: "Felipe Torres Gmail", account: "Google", color: null },
+          ]);
+        case "get_paused":
+          return Promise.resolve(false);
+        case "get_ignored":
+          return Promise.resolve([] as string[]);
+        default:
+          return Promise.resolve(undefined);
+      }
+    });
+    render(<TrayPopover />);
+    // One row with the survivor's own origin — the OTHER account (Google) is NOT
+    // listed in the tray, and there's no duplicate-count badge.
+    expect(await screen.findByText("ADHD meds")).toBeInTheDocument();
+    expect(screen.getByText("felipe@skyward.ai · Felipe Torres Gmail")).toBeInTheDocument();
+    expect(screen.queryByText("Google · Felipe Torres Gmail")).not.toBeInTheDocument();
+    expect(screen.queryByText(/⧉/)).not.toBeInTheDocument();
   });
 
   it("live event with reason=undefined falls back to generic copy without crashing", async () => {
