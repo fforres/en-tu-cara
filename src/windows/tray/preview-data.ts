@@ -34,6 +34,34 @@ function iso(base: number, minutesFromNow: number): string {
   return new Date(base + minutesFromNow * 60_000).toISOString();
 }
 
+// One UiEvent factory for both previews. A caller gives either a single
+// `calendar_id` (popover rows) or an explicit `calendars[]` (the dedup/origins
+// cases); the primary `calendar_id`/`calendar_title` are always derived from the
+// resulting first calendar so the two stay consistent.
+function makeEvent(
+  over: Partial<UiEvent> & Pick<UiEvent, "occurrence_key" | "title" | "start" | "end">,
+): UiEvent {
+  const calendars =
+    over.calendars ??
+    (over.calendar_id !== undefined
+      ? [{ calendar_id: over.calendar_id, calendar_title: over.calendar_title ?? null }]
+      : []);
+  return {
+    id: over.occurrence_key,
+    all_day: false,
+    status: "confirmed",
+    my_rsvp: "accepted",
+    is_recurring_occurrence: false,
+    url: null,
+    location: null,
+    notes: null,
+    ...over,
+    calendars,
+    calendar_id: calendars[0]?.calendar_id ?? null,
+    calendar_title: calendars[0]?.calendar_title ?? null,
+  };
+}
+
 // Builds a realistic-ish snapshot relative to `now`: two ongoing events, the
 // cross-account duplicate showcase, and enough upcoming events (across several
 // days) to force scrolling.
@@ -41,26 +69,9 @@ export function mockPopoverData(now: number): {
   events: UiEvent[];
   calendars: MockCalendar[];
 } {
-  const base = (
-    over: Partial<UiEvent> &
-      Pick<UiEvent, "occurrence_key" | "title" | "start" | "end" | "calendar_id">,
-  ): UiEvent => ({
-    id: over.occurrence_key,
-    all_day: false,
-    status: "confirmed",
-    my_rsvp: "accepted",
-    is_recurring_occurrence: false,
-    calendar_title: null,
-    url: null,
-    location: null,
-    notes: null,
-    calendars: [{ calendar_id: over.calendar_id, calendar_title: over.calendar_title ?? null }],
-    ...over,
-  });
-
   const events: UiEvent[] = [
     // --- Ongoing ---
-    base({
+    makeEvent({
       occurrence_key: "(focus @ now)",
       title: "Focus block — deep work",
       start: iso(now, -25),
@@ -68,7 +79,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "team",
       calendar_title: "Team Events",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(standup @ now)",
       title: "Eng standup",
       start: iso(now, -5),
@@ -79,7 +90,7 @@ export function mockPopoverData(now: number): {
     }),
 
     // --- THE dedup showcase: same meeting on TWO accounts ---
-    base({
+    makeEvent({
       occurrence_key: "(adhd @ t1)",
       title: "ADHD medication",
       start: iso(now, 45),
@@ -94,7 +105,7 @@ export function mockPopoverData(now: number): {
     }),
 
     // --- Plenty of upcoming events to force scrolling ---
-    base({
+    makeEvent({
       occurrence_key: "(1on1 @ t)",
       title: "1:1 with Ana",
       start: iso(now, 90),
@@ -103,7 +114,7 @@ export function mockPopoverData(now: number): {
       calendar_title: "Felipe Torres Gmail",
       notes: `Join: ${MEET}`,
     }),
-    base({
+    makeEvent({
       occurrence_key: "(design @ t)",
       title: "Design review — overlay redesign",
       start: iso(now, 150),
@@ -112,7 +123,7 @@ export function mockPopoverData(now: number): {
       calendar_title: "Team Events",
       notes: `Join: ${ZOOM}`,
     }),
-    base({
+    makeEvent({
       occurrence_key: "(lunch @ t)",
       title: "Lunch with the team",
       start: iso(now, 240),
@@ -120,7 +131,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "life",
       calendar_title: "Personal",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(gym @ t)",
       title: "Gym",
       start: iso(now, 24 * 60),
@@ -128,7 +139,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "life",
       calendar_title: "Personal",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(allhands @ t)",
       title: "Company all-hands",
       start: iso(now, 24 * 60 + 120),
@@ -138,7 +149,7 @@ export function mockPopoverData(now: number): {
       notes: `Join: ${MEET}`,
     }),
     // Another cross-account duplicate, a longer title, to test wrapping/badge.
-    base({
+    makeEvent({
       occurrence_key: "(planning @ t)",
       title: "Quarterly planning & roadmap sync (long title to test ellipsis)",
       start: iso(now, 24 * 60 + 240),
@@ -150,7 +161,7 @@ export function mockPopoverData(now: number): {
         { calendar_id: "team", calendar_title: "Team Events" },
       ],
     }),
-    base({
+    makeEvent({
       occurrence_key: "(dentist @ t)",
       title: "Dentist appointment",
       start: iso(now, 2 * 24 * 60),
@@ -158,7 +169,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "life",
       calendar_title: "Personal",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(retro @ t)",
       title: "Sprint retro",
       start: iso(now, 2 * 24 * 60 + 120),
@@ -167,7 +178,7 @@ export function mockPopoverData(now: number): {
       calendar_title: "Team Events",
       notes: `Join: ${ZOOM}`,
     }),
-    base({
+    makeEvent({
       occurrence_key: "(coffee @ t)",
       title: "Coffee with Sam",
       start: iso(now, 3 * 24 * 60),
@@ -175,7 +186,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "life",
       calendar_title: "Personal",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(review @ t)",
       title: "Perf review prep",
       start: iso(now, 3 * 24 * 60 + 90),
@@ -183,7 +194,7 @@ export function mockPopoverData(now: number): {
       calendar_id: "work",
       calendar_title: "Felipe Torres Gmail",
     }),
-    base({
+    makeEvent({
       occurrence_key: "(demo @ t)",
       title: "Customer demo",
       start: iso(now, 4 * 24 * 60),
@@ -230,23 +241,6 @@ export function mockOverlayData(now: number): {
   events: UiEvent[];
   calendars: MockCalendar[];
 } {
-  const event = (
-    over: Partial<UiEvent> &
-      Pick<UiEvent, "occurrence_key" | "title" | "start" | "end" | "calendars">,
-  ): UiEvent => ({
-    id: over.occurrence_key,
-    all_day: false,
-    status: "confirmed",
-    my_rsvp: "accepted",
-    is_recurring_occurrence: false,
-    calendar_id: over.calendars[0]?.calendar_id ?? null,
-    calendar_title: over.calendars[0]?.calendar_title ?? null,
-    url: null,
-    location: null,
-    notes: null,
-    ...over,
-  });
-
   const alarms: MockAlarm[] = [
     {
       occurrence_key: "(eng @ t1)",
@@ -265,7 +259,7 @@ export function mockOverlayData(now: number): {
   ];
 
   const events: UiEvent[] = [
-    event({
+    makeEvent({
       occurrence_key: "(eng @ t1)",
       title: "🔥 ENGINEERING 🔥 Sync",
       start: iso(now, 5),
@@ -276,7 +270,7 @@ export function mockOverlayData(now: number): {
         { calendar_id: "israel", calendar_title: "israel@skyward.ai" },
       ],
     }),
-    event({
+    makeEvent({
       occurrence_key: "(basura @ t1)",
       title: "Sacar la basura",
       start: iso(now, 1),

@@ -157,31 +157,24 @@ pub fn dedup_events(events: Vec<EventDto>) -> Vec<EventDto> {
     let mut order: Vec<String> = Vec::new();
     for e in events {
         let k = merge_key(&e);
-        match best.get_mut(&k) {
-            None => {
-                order.push(k.clone());
-                best.insert(k, e);
+        let Some(existing) = best.get_mut(&k) else {
+            order.push(k.clone());
+            best.insert(k, e);
+            continue;
+        };
+        // Whichever copy wins, the survivor must list every calendar the meeting
+        // appears on — so merge calendars in first (dedup, first-seen order).
+        for c in &e.calendars {
+            if !existing.calendars.contains(c) {
+                existing.calendars.push(c.clone());
             }
-            Some(existing) => {
-                // Whichever copy wins, the survivor must list both calendars.
-                if score(&e) > score(existing) {
-                    let mut cals = std::mem::take(&mut existing.calendars);
-                    let mut winner = e;
-                    for c in std::mem::take(&mut winner.calendars) {
-                        if !cals.contains(&c) {
-                            cals.push(c);
-                        }
-                    }
-                    winner.calendars = cals;
-                    *existing = winner;
-                } else {
-                    for c in e.calendars {
-                        if !existing.calendars.contains(&c) {
-                            existing.calendars.push(c);
-                        }
-                    }
-                }
-            }
+        }
+        // Then, if this copy is the better representative, swap it in WITHOUT
+        // losing the merged calendar list (merging didn't change its score).
+        if score(&e) > score(existing) {
+            let cals = std::mem::take(&mut existing.calendars);
+            *existing = e;
+            existing.calendars = cals;
         }
     }
     order.into_iter().filter_map(|k| best.remove(&k)).collect()

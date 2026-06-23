@@ -236,12 +236,7 @@ pub fn run() {
                         std::thread::sleep(std::time::Duration::from_secs(3));
                         let h = handle.clone();
                         let dispatched = handle.run_on_main_thread(move || {
-                            let r = if kind == "overlay" {
-                                tray::open_preview_overlay(h)
-                            } else {
-                                tray::open_preview_popover(h)
-                            };
-                            match r {
+                            match tray::open_preview(h, &kind) {
                                 Ok(()) => eprintln!("PREVIEW: {kind} window opened"),
                                 Err(e) => eprintln!("PREVIEW: ERR {e}"),
                             }
