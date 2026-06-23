@@ -76,10 +76,10 @@ if (dryRun) {
 
 // --- write release.json (source) + the 4 files the build reads ----------
 release.version = next;
-// Clear the previous release's notes so they can't ship verbatim under the new
-// version (v0.3.0 published with 0.2.0's notes this way). Empty notes are safe:
-// release.yml falls back to a generic body. Write fresh notes before merging.
-const hadNotes = Boolean(release.notes);
+// Clear the previous release's fallback notes so they can't ship verbatim under
+// the new version (v0.3.0 published with 0.2.0's notes this way). The real
+// release body now lives in changelog/v<next>.md (see changelog/README.md);
+// release.json.notes is only a fallback for an un-migrated bump.
 release.notes = "";
 writeFileSync(releasePath, JSON.stringify(release, null, 2) + "\n");
 
@@ -119,8 +119,6 @@ if (commit) {
   console.log(`\x1b[32m✓ bumped to ${next}.\x1b[0m Review the diff, then:`);
   console.log(`  git commit -am "chore(release): ${tag}"   # PR + merge to main → CI cuts ${tag}`);
 }
-if (hadNotes) {
-  console.log(
-    `\x1b[33m⚠ cleared the previous release's notes in release.json — write ${tag}'s notes there before merging (empty notes publish a generic body).\x1b[0m`,
-  );
-}
+console.log(
+  `\x1b[33m⚠ write ${tag}'s release notes in changelog/v${next}.md before merging — that file's body is what CI publishes (see changelog/README.md). Missing/empty → a generic body.\x1b[0m`,
+);

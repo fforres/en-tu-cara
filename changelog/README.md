@@ -27,8 +27,8 @@ newest-first.
 
 ## When you cut a release
 
-Releasing is still driven by `release.json` (see `docs/RELEASING.md`). The
-changelog is maintained alongside it — for each new version, add
-`changelog/v<version>.md` with the same notes you put in `release.json`'s `notes`
-field. (They're kept in sync by hand; `release.json.notes` is what CI publishes,
-this file is what the app and website show.)
+Releasing is still triggered by `release.json` (a version change on `main` —
+see `docs/RELEASING.md`), but **this file is the source of the release notes**.
+For each new version, add `changelog/v<version>.md`; `cut-release.yml` reads its
+body for the GitHub release / `latest.json`, and the app + website render the
+same file. `release.json.notes` is now just a fallback for an un-migrated bump.

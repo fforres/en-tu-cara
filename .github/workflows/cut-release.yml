@@ -80,8 +80,22 @@ jobs:
             echo "tag=$TAG"
             # Unlikely-to-collide heredoc delimiter (notes are author-controlled,
             # but a fixed common token like EOF could appear in release notes).
+            # The release body is `changelog/v<version>.md`'s body (the in-code
+            # changelog is the source of truth — see changelog/README.md), with
+            # release.json.notes as a fallback so an un-migrated bump still works.
             echo "body<<__ETC_RELEASE_NOTES_EOF__"
-            node -p "require('./release.json').notes || ''"
+            node -e '
+              const fs = require("fs");
+              const v = require("./release.json").version;
+              let out = "";
+              try {
+                const raw = fs.readFileSync(`./changelog/v${v}.md`, "utf8").replace(/\r\n/g, "\n");
+                const m = /^---\n[\s\S]*?\n---\n?/.exec(raw);
+                out = (m ? raw.slice(m[0].length) : raw).trim();
+              } catch {}
+              if (!out) { out = require("./release.json").notes || ""; }
+              process.stdout.write(out);
+            '
             echo "__ETC_RELEASE_NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
 
