@@ -5,11 +5,15 @@ name: Cut Release
 # never trigger this, and the version number is whatever YOU wrote in the file
 # (CI never guesses it). The release-exists guard makes re-runs idempotent yet
 # recoverable: a failed build leaves no published release, so a retry re-points
-# the tag and rebuilds. See docs/RELEASING.md.
+# the tag and rebuilds. workflow_dispatch is the manual escape hatch — re-cut the
+# version currently in release.json without another bump (e.g. to recover from a
+# workflow-level failure, where re-running the failed run would just replay the
+# broken workflow at its commit). See docs/RELEASING.md.
 on:
   push:
     branches: [main]
     paths: ["release.json"]
+  workflow_dispatch: {}
 
 permissions:
   contents: write
@@ -94,7 +98,10 @@ jobs:
                 out = (m ? raw.slice(m[0].length) : raw).trim();
               } catch {}
               if (!out) { out = require("./release.json").notes || ""; }
-              process.stdout.write(out);
+              // console.log adds the trailing newline the heredoc needs: without
+              // it the body's last line glues to the closing delimiter and the
+              // GITHUB_OUTPUT parse fails ("Matching delimiter not found").
+              console.log(out);
             '
             echo "__ETC_RELEASE_NOTES_EOF__"
           } >> "$GITHUB_OUTPUT"
