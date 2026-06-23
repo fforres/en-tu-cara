@@ -63,6 +63,7 @@ export type Control =
   | { kind: "feedback" } // suggestion box → PostHog (submit_feedback)
   | { kind: "export-logs" } // save local logs to Downloads + clipboard (export_logs)
   | { kind: "version" } // app version + "Check for Updates"
+  | { kind: "changelog" } // full release history (in-code changelog/)
   | { kind: "note" } // description-only (no control)
   | { kind: "placeholder"; note: string }; // documented not-yet feature
 
@@ -274,6 +275,14 @@ export const REGISTRY: SettingDef[] = [
     description: "The version you're running.",
     keywords: ["version", "update", "check for updates", "build"],
     control: { kind: "version" },
+  },
+  {
+    id: "about.changelog",
+    section: "about",
+    label: "What's new",
+    description: "Release notes for this and every previous version.",
+    keywords: ["changelog", "what's new", "whats new", "release notes", "history", "versions"],
+    control: { kind: "changelog" },
   },
   {
     id: "about.project",
