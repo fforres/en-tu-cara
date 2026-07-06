@@ -370,16 +370,24 @@ fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge, down
     }
 }
 
-/// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
-fn tick(app: &tauri::AppHandle) -> u64 {
-    let now = crate::testmode::clock::now();
-    let settings = app.state::<crate::settings::SettingsStore>().get();
-    let cfg = crate::alarm_core::AlarmConfig {
+/// Build the pure alarm policy from persisted settings. The ONLY place user
+/// settings become alarm timing: reminder offsets are minutes → seconds, and an
+/// empty `reminders` list stays empty (no pre-event reminders; the mandatory T-0
+/// still fires). Pure + `pub(crate)` so the settings→timing seam is unit-testable.
+pub(crate) fn build_alarm_config(settings: &crate::settings::Settings) -> crate::alarm_core::AlarmConfig {
+    crate::alarm_core::AlarmConfig {
         reminder_offsets_secs: settings.reminders.iter().map(|&m| i64::from(m) * 60).collect(),
         alert_tentative: settings.alert_tentative,
         alert_pending: settings.alert_pending,
         only_video_events: settings.only_video_events,
-    };
+    }
+}
+
+/// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
+fn tick(app: &tauri::AppHandle) -> u64 {
+    let now = crate::testmode::clock::now();
+    let settings = app.state::<crate::settings::SettingsStore>().get();
+    let cfg = build_alarm_config(&settings);
     let (events, fetch_outcome) = upcoming_alarm_events(&settings);
     {
         // Edge-triggered "calendar went empty / came back" signal (INFO).
@@ -882,6 +890,84 @@ mod tests {
             Some(""),
             "reason must be \"\" when state is ok"
         );
+    }
+
+    // The settings→timing seam: persisted `reminders` (minutes) must become
+    // AlarmConfig offsets (seconds), and drive real firing end to end. This is the
+    // one seam the alarm_core + settings unit tests can't reach on their own.
+    mod settings_to_alarms {
+        use super::*;
+        use crate::alarm_core::{compute_actions, AlarmEvent, AlarmKind, AlarmState};
+        use crate::settings::Settings;
+        use chrono::{DateTime, Duration, Utc};
+
+        fn base() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-07-06T16:00:00Z").unwrap().with_timezone(&Utc)
+        }
+
+        fn event_starting_in(secs: i64) -> AlarmEvent {
+            let start = base() + Duration::seconds(secs);
+            AlarmEvent {
+                occurrence_key: "(m @ t)".into(),
+                title: "Meeting".into(),
+                start,
+                end: start + Duration::minutes(30),
+                all_day: false,
+                status: "confirmed".into(),
+                my_rsvp: Some("accepted".into()),
+                has_link: true,
+            }
+        }
+
+        #[test]
+        fn reminder_minutes_become_offset_seconds() {
+            let cfg = build_alarm_config(&Settings {
+                reminders: vec![20, 5],
+                ..Settings::default()
+            });
+            assert_eq!(cfg.reminder_offsets_secs, vec![1200, 300], "minutes × 60");
+        }
+
+        #[test]
+        fn multiple_reminders_plus_mandatory_start_fire_end_to_end() {
+            // A meeting 30 min out with reminders at 20 and 5 min before.
+            let cfg = build_alarm_config(&Settings {
+                reminders: vec![20, 5],
+                ..Settings::default()
+            });
+            let events = vec![event_starting_in(30 * 60)];
+            let mut state = AlarmState::default();
+
+            // T-20 (10 min in): the 20-min reminder is due.
+            let at_20 = compute_actions(&events, base() + Duration::minutes(10), &state, &cfg);
+            assert_eq!(at_20.len(), 1);
+            assert_eq!(at_20[0].kind, AlarmKind::Reminder(1200));
+            state.mark_fired("(m @ t)", AlarmKind::Reminder(1200), base());
+
+            // T-5 (25 min in): the 5-min reminder is due, independently of the first.
+            let at_5 = compute_actions(&events, base() + Duration::minutes(25), &state, &cfg);
+            assert_eq!(at_5[0].kind, AlarmKind::Reminder(300));
+            state.mark_fired("(m @ t)", AlarmKind::Reminder(300), base());
+
+            // Start: the mandatory T-0 fires.
+            let at_0 = compute_actions(&events, base() + Duration::minutes(30), &state, &cfg);
+            assert_eq!(at_0[0].kind, AlarmKind::TZero);
+        }
+
+        #[test]
+        fn zero_reminders_still_fires_only_the_mandatory_start() {
+            // User removed every pre-event reminder.
+            let cfg = build_alarm_config(&Settings { reminders: vec![], ..Settings::default() });
+            let events = vec![event_starting_in(5 * 60)];
+            let state = AlarmState::default();
+
+            // No pre-event reminder ever fires…
+            assert!(compute_actions(&events, base() + Duration::minutes(4), &state, &cfg).is_empty());
+            // …but the start alarm is mandatory and DOES fire.
+            let at_0 = compute_actions(&events, base() + Duration::minutes(5), &state, &cfg);
+            assert_eq!(at_0.len(), 1);
+            assert_eq!(at_0[0].kind, AlarmKind::TZero);
+        }
     }
 }
 
