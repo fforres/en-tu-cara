@@ -103,9 +103,9 @@ describe("fuzzyMatch", () => {
 });
 
 describe("searchSettings over the real registry", () => {
-  it("'snooze' top hit is the snooze durations setting, with label highlight", () => {
+  it("'snooze' top hit is the default-snooze setting, with label highlight", () => {
     const hits = searchSettings("snooze", REGISTRY);
-    expect(hits[0].setting.id).toBe("alerts.snooze-durations");
+    expect(hits[0].setting.id).toBe("alerts.default-snooze");
     expect(hits[0].labelRanges.length).toBeGreaterThan(0);
   });
 

@@ -43,7 +43,7 @@ impl Drop for ActivityAssertion {
 // Production loop (Phase 3)
 // ---------------------------------------------------------------------------
 
-use crate::alarm_core::{compute_actions, next_due, AlarmEvent, AlarmKind};
+use crate::alarm_core::{compute_actions, next_due, AlarmEvent};
 use crate::state::SharedState;
 use serde::Deserialize;
 use std::sync::Mutex;
@@ -370,16 +370,24 @@ fn on_access_edge(app: &tauri::AppHandle, edge: &crate::access::AccessEdge, down
     }
 }
 
+/// Build the pure alarm policy from persisted settings. The ONLY place user
+/// settings become alarm timing: reminder offsets are minutes → seconds, and an
+/// empty `reminders` list stays empty (no pre-event reminders; the mandatory T-0
+/// still fires). Pure + `pub(crate)` so the settings→timing seam is unit-testable.
+pub(crate) fn build_alarm_config(settings: &crate::settings::Settings) -> crate::alarm_core::AlarmConfig {
+    crate::alarm_core::AlarmConfig {
+        reminder_offsets_secs: settings.reminders.iter().map(|&m| i64::from(m) * 60).collect(),
+        alert_tentative: settings.alert_tentative,
+        alert_pending: settings.alert_pending,
+        only_video_events: settings.only_video_events,
+    }
+}
+
 /// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
 fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
     let settings = app.state::<crate::settings::SettingsStore>().get();
-    let cfg = crate::alarm_core::AlarmConfig {
-        lead_secs: i64::from(settings.lead_minutes) * 60,
-        alert_tentative: settings.alert_tentative,
-        alert_pending: settings.alert_pending,
-        only_video_events: settings.only_video_events,
-    };
+    let cfg = build_alarm_config(&settings);
     let (events, fetch_outcome) = upcoming_alarm_events(&settings);
     {
         // Edge-triggered "calendar went empty / came back" signal (INFO).
@@ -412,15 +420,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     };
 
     for action in &actions {
-        crate::testmode::log_fire(
-            &action.occurrence_key,
-            match action.kind {
-                AlarmKind::TMinus5 => "t_minus_5",
-                AlarmKind::TZero => "t_zero",
-                AlarmKind::Snooze => "snooze",
-            },
-            action.due_at,
-        );
+        crate::testmode::log_fire(&action.occurrence_key, &action.kind.tag(), action.due_at);
         // Suppressed actions carry no overlay (dedup/policy) — record them fired
         // so they aren't reconsidered, and move on.
         if action.suppressed {
@@ -430,7 +430,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         let event = events.iter().find(|e| e.occurrence_key == action.occurrence_key);
         let payload = serde_json::json!({
             "occurrence_key": action.occurrence_key,
-            "kind": action.kind,
+            "kind": action.kind.tag(),
             "title": event.map(|e| e.title.clone()).unwrap_or_default(),
             "start": event.map(|e| e.start.to_rfc3339()),
             "end": event.map(|e| e.end.to_rfc3339()),
@@ -474,7 +474,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
                     "alarm_fired",
                     serde_json::json!({
                         "occurrence_hash": occurrence_hash,
-                        "kind": action.kind,
+                        "kind": action.kind.tag(),
                         "late_ms": late_ms,
                     }),
                 );
@@ -617,7 +617,7 @@ pub fn demo_alert(app: tauri::AppHandle) {
     let now = crate::testmode::clock::now();
     let payload = serde_json::json!({
         "occurrence_key": "(demo @ now)",
-        "kind": "t_minus5",
+        "kind": "reminder_45",
         "title": "Hello, I'm a demo event",
         "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
         "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
@@ -830,10 +830,10 @@ mod tests {
 
     #[test]
     fn dismissing_one_occurrence_keeps_the_other() {
-        // Two overlapping meetings on screen, meeting A with both T-5 and T-0
-        // cards. Dismissing A must drop BOTH A cards and leave B untouched.
+        // Two overlapping meetings on screen, meeting A with both a reminder and a
+        // T-0 card. Dismissing A must drop BOTH A cards and leave B untouched.
         let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
             serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
             serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
         ];
@@ -848,7 +848,7 @@ mod tests {
         // true → finish_one (close/re-render + stop sound); false → leave overlay
         // untouched. A key with ANY card on screen (even a different kind) is active.
         let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
             serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
         ];
         assert!(is_occurrence_active(&active, "(A @ t)"));
@@ -890,6 +890,84 @@ mod tests {
             Some(""),
             "reason must be \"\" when state is ok"
         );
+    }
+
+    // The settings→timing seam: persisted `reminders` (minutes) must become
+    // AlarmConfig offsets (seconds), and drive real firing end to end. This is the
+    // one seam the alarm_core + settings unit tests can't reach on their own.
+    mod settings_to_alarms {
+        use super::*;
+        use crate::alarm_core::{compute_actions, AlarmEvent, AlarmKind, AlarmState};
+        use crate::settings::Settings;
+        use chrono::{DateTime, Duration, Utc};
+
+        fn base() -> DateTime<Utc> {
+            DateTime::parse_from_rfc3339("2026-07-06T16:00:00Z").unwrap().with_timezone(&Utc)
+        }
+
+        fn event_starting_in(secs: i64) -> AlarmEvent {
+            let start = base() + Duration::seconds(secs);
+            AlarmEvent {
+                occurrence_key: "(m @ t)".into(),
+                title: "Meeting".into(),
+                start,
+                end: start + Duration::minutes(30),
+                all_day: false,
+                status: "confirmed".into(),
+                my_rsvp: Some("accepted".into()),
+                has_link: true,
+            }
+        }
+
+        #[test]
+        fn reminder_minutes_become_offset_seconds() {
+            let cfg = build_alarm_config(&Settings {
+                reminders: vec![20, 5],
+                ..Settings::default()
+            });
+            assert_eq!(cfg.reminder_offsets_secs, vec![1200, 300], "minutes × 60");
+        }
+
+        #[test]
+        fn multiple_reminders_plus_mandatory_start_fire_end_to_end() {
+            // A meeting 30 min out with reminders at 20 and 5 min before.
+            let cfg = build_alarm_config(&Settings {
+                reminders: vec![20, 5],
+                ..Settings::default()
+            });
+            let events = vec![event_starting_in(30 * 60)];
+            let mut state = AlarmState::default();
+
+            // T-20 (10 min in): the 20-min reminder is due.
+            let at_20 = compute_actions(&events, base() + Duration::minutes(10), &state, &cfg);
+            assert_eq!(at_20.len(), 1);
+            assert_eq!(at_20[0].kind, AlarmKind::Reminder(1200));
+            state.mark_fired("(m @ t)", AlarmKind::Reminder(1200), base());
+
+            // T-5 (25 min in): the 5-min reminder is due, independently of the first.
+            let at_5 = compute_actions(&events, base() + Duration::minutes(25), &state, &cfg);
+            assert_eq!(at_5[0].kind, AlarmKind::Reminder(300));
+            state.mark_fired("(m @ t)", AlarmKind::Reminder(300), base());
+
+            // Start: the mandatory T-0 fires.
+            let at_0 = compute_actions(&events, base() + Duration::minutes(30), &state, &cfg);
+            assert_eq!(at_0[0].kind, AlarmKind::TZero);
+        }
+
+        #[test]
+        fn zero_reminders_still_fires_only_the_mandatory_start() {
+            // User removed every pre-event reminder.
+            let cfg = build_alarm_config(&Settings { reminders: vec![], ..Settings::default() });
+            let events = vec![event_starting_in(5 * 60)];
+            let state = AlarmState::default();
+
+            // No pre-event reminder ever fires…
+            assert!(compute_actions(&events, base() + Duration::minutes(4), &state, &cfg).is_empty());
+            // …but the start alarm is mandatory and DOES fire.
+            let at_0 = compute_actions(&events, base() + Duration::minutes(5), &state, &cfg);
+            assert_eq!(at_0.len(), 1);
+            assert_eq!(at_0[0].kind, AlarmKind::TZero);
+        }
     }
 }
 

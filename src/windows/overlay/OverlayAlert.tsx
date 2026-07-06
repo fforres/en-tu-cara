@@ -21,8 +21,9 @@ const PREVIEW = new URLSearchParams(window.location.search).get("preview") === "
 
 interface AlarmPayload {
   occurrence_key: string;
+  // Reminder kinds are tagged by offset (`reminder_5`, `reminder_20`, …); the
   // `string & {}` keeps literal hints without collapsing the union to `string`.
-  kind: "t_minus5" | "t_zero" | "snooze" | (string & {});
+  kind: "t_zero" | "snooze" | (string & {});
   title: string;
   start: string | null;
   end: string | null;
@@ -34,7 +35,7 @@ interface CalendarInfo extends AccountInfo {
 
 interface SettingsLite {
   theme: string;
-  snooze_minutes: number[];
+  default_snooze_minutes: number;
 }
 
 function countdownLabel(payload: AlarmPayload, now: Date): string {
@@ -68,7 +69,7 @@ export function OverlayAlert() {
   const [events, setEvents] = useState<UiEvent[]>([]);
   const [calendars, setCalendars] = useState<Map<string, CalendarInfo>>(new Map());
   const [theme, setTheme] = useState<Theme>(() => resolveTheme(null));
-  const [snoozes, setSnoozes] = useState<number[]>([1, 5]);
+  const [snoozeMinutes, setSnoozeMinutes] = useState<number>(5);
   const [now, setNow] = useState(() => new Date());
   const containerRef = useRef<HTMLElement>(null);
 
@@ -125,8 +126,8 @@ export function OverlayAlert() {
     invoke<SettingsLite>("get_settings")
       .then((s) => {
         setTheme(resolveTheme(s.theme));
-        if (s.snooze_minutes?.length) {
-          setSnoozes(s.snooze_minutes);
+        if (s.default_snooze_minutes && s.default_snooze_minutes > 0) {
+          setSnoozeMinutes(s.default_snooze_minutes);
         }
       })
       .catch(() => {});
@@ -358,30 +359,27 @@ export function OverlayAlert() {
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 4 }}>
-              {snoozes.map((m) => (
-                <button
-                  key={m}
-                  onClick={() =>
-                    void invoke("snooze_alarm", {
-                      occurrenceKey: alarm.occurrence_key,
-                      minutes: m,
-                    }).catch(() => {})
-                  }
-                  style={{
-                    font: "inherit",
-                    fontSize: 13,
-                    padding: "5px 14px",
-                    borderRadius: 6,
-                    border: `1px solid ${theme.buttonBorder}`,
-                    background: "transparent",
-                    color: theme.text,
-                    opacity: 0.85,
-                    cursor: "pointer",
-                  }}
-                >
-                  Snooze {m} min
-                </button>
-              ))}
+              <button
+                onClick={() =>
+                  void invoke("snooze_alarm", {
+                    occurrenceKey: alarm.occurrence_key,
+                    minutes: snoozeMinutes,
+                  }).catch(() => {})
+                }
+                style={{
+                  font: "inherit",
+                  fontSize: 13,
+                  padding: "5px 14px",
+                  borderRadius: 6,
+                  border: `1px solid ${theme.buttonBorder}`,
+                  background: "transparent",
+                  color: theme.text,
+                  opacity: 0.85,
+                  cursor: "pointer",
+                }}
+              >
+                Remind me again in {snoozeMinutes} {snoozeMinutes === 1 ? "minute" : "minutes"}
+              </button>
             </div>
           </section>
         ))}

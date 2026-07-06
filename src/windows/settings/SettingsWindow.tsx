@@ -436,27 +436,53 @@ function ControlView({
         </select>
       );
     }
-    case "snooze-list": {
+    case "reminder-list": {
+      // 0–3 pre-event reminders, each an editable offset in minutes. Removing them
+      // all is valid (only the mandatory start alert fires); adding is capped at 3.
+      const reminders = settings.reminders;
+      const setReminders = (next: number[]) => update({ reminders: next });
       return (
-        <span style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-          {settings.snooze_minutes.map((m, i) => (
-            <input
-              key={i}
-              type="number"
-              aria-label={`Snooze duration ${i + 1}`}
-              min={1}
-              max={120}
-              value={m}
-              onChange={(e) => {
-                const next = [...settings.snooze_minutes];
-                next[i] = Math.min(120, Math.max(1, Number(e.target.value) || 1));
-                update({ snooze_minutes: next });
-              }}
-              style={{ width: 56, font: "inherit", padding: "3px 6px" }}
-            />
+        <div style={{ display: "flex", flexDirection: "column", gap: 8, alignItems: "flex-start" }}>
+          {reminders.map((m, i) => (
+            <span key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <input
+                type="number"
+                aria-label={`Reminder ${i + 1}`}
+                min={1}
+                max={120}
+                value={m}
+                onChange={(e) => {
+                  const next = [...reminders];
+                  next[i] = Math.min(120, Math.max(1, Number(e.target.value) || 1));
+                  setReminders(next);
+                }}
+                style={{ width: 56, font: "inherit", padding: "3px 6px" }}
+              />
+              <span style={{ color: css.secondary, fontSize: 12 }}>min before</span>
+              <button
+                aria-label={`Remove reminder ${i + 1}`}
+                title="Remove"
+                onClick={() => setReminders(reminders.filter((_, j) => j !== i))}
+                style={{ font: "inherit", padding: "2px 8px", cursor: "pointer" }}
+              >
+                ×
+              </button>
+            </span>
           ))}
-          <span style={{ color: css.secondary, fontSize: 12 }}>minutes</span>
-        </span>
+          {reminders.length === 0 && (
+            <span style={{ color: css.secondary, fontSize: 12 }}>
+              No pre-event reminders — only the meeting-start alert will fire.
+            </span>
+          )}
+          {reminders.length < 3 && (
+            <button
+              onClick={() => setReminders([...reminders, 5])}
+              style={{ font: "inherit", padding: "3px 10px", cursor: "pointer" }}
+            >
+              Add reminder
+            </button>
+          )}
+        </div>
       );
     }
     case "calendar-list": {

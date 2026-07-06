@@ -1,13 +1,16 @@
 //! Pure alarm decision core: `compute_actions(events, now, state)`.
 //!
 //! Encodes EVERY policy as testable data, no clocks, no EventKit, no UI:
-//!   - T-5m and T-0 alarms per event occurrence
+//!   - 0–3 configurable pre-event reminders + a MANDATORY T-0 (start) alarm per
+//!     occurrence. The start alarm always fires even with zero reminders.
 //!   - declined / canceled / all-day events never alert
 //!   - missed-while-asleep: fire on next tick if event still ongoing, skip if ended
-//!   - event created inside the T-5 window → only T-0 (no stale T-5)
+//!   - event created inside a reminder window → only the reminders still ahead of
+//!     start + T-0 (no stale post-start reminder)
 //!   - pause: decisions still advance fired-state, presentation suppressed
 //!   - snoozes: persisted deadlines fire when due, survive restart
-//!   - dedup via fired-set keyed by (occurrence_key, kind)
+//!   - dedup via fired-set keyed by (occurrence_key, kind) — each reminder offset
+//!     is its own kind, so multiple reminders each fire exactly once
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
@@ -17,7 +20,10 @@ use std::collections::HashMap;
 /// stays clock-free AND config-free).
 #[derive(Debug, Clone)]
 pub struct AlarmConfig {
-    pub lead_secs: i64,
+    /// Pre-event reminder offsets, in SECONDS before the event start, in the order
+    /// the user configured them. 0–3 entries. Empty = no pre-event reminders (the
+    /// T-0 start alarm still fires — it is mandatory, see `compute_actions`).
+    pub reminder_offsets_secs: Vec<i64>,
     pub alert_tentative: bool,
     pub alert_pending: bool,
     pub only_video_events: bool,
@@ -25,7 +31,12 @@ pub struct AlarmConfig {
 
 impl Default for AlarmConfig {
     fn default() -> Self {
-        Self { lead_secs: 5 * 60, alert_tentative: true, alert_pending: true, only_video_events: false }
+        Self {
+            reminder_offsets_secs: vec![5 * 60],
+            alert_tentative: true,
+            alert_pending: true,
+            only_video_events: false,
+        }
     }
 }
 
@@ -47,9 +58,26 @@ pub struct AlarmEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Hash)]
 #[serde(rename_all = "snake_case")]
 pub enum AlarmKind {
-    TMinus5,
+    /// A pre-event reminder, tagged by its offset in SECONDS before start. The
+    /// offset is part of the identity so two reminders (e.g. 20m and 5m before)
+    /// dedupe independently in the fired-set.
+    Reminder(i64),
+    /// The mandatory event-start alarm (T-0). Always fires, cannot be disabled.
     TZero,
     Snooze,
+}
+
+impl AlarmKind {
+    /// Stable string identity used for the JS overlay payload, the fire log, and
+    /// telemetry. Reminders are tagged by their offset in MINUTES (offsets always
+    /// arrive as whole minutes × 60), so `reminder_5`, `reminder_20`, etc.
+    pub fn tag(&self) -> String {
+        match self {
+            AlarmKind::Reminder(secs) => format!("reminder_{}", secs / 60),
+            AlarmKind::TZero => "t_zero".to_string(),
+            AlarmKind::Snooze => "snooze".to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -166,20 +194,24 @@ pub fn compute_actions(
         .iter()
         .filter(|e| alertable(e, cfg) && !state.is_ignored(&e.occurrence_key))
     {
-        let t5_due = event.start - Duration::seconds(cfg.lead_secs);
-
-        // T-5: due, not yet fired, and the MEETING HAS NOT STARTED — once the
-        // event is under way a "starts in 5 minutes" alert is a lie; T-0 covers it.
-        if now >= t5_due
-            && now < event.start
-            && !state.has_fired(&event.occurrence_key, AlarmKind::TMinus5)
-        {
-            actions.push(FireAction {
-                occurrence_key: event.occurrence_key.clone(),
-                kind: AlarmKind::TMinus5,
-                due_at: t5_due,
-                suppressed: state.paused,
-            });
+        // Pre-event reminders: each configured offset is its own alarm. A reminder
+        // is due, not yet fired, and only fires while the MEETING HAS NOT STARTED —
+        // once the event is under way a "starts in N minutes" alert is a lie; the
+        // T-0 start alarm covers it.
+        for &offset in &cfg.reminder_offsets_secs {
+            let kind = AlarmKind::Reminder(offset);
+            let due = event.start - Duration::seconds(offset);
+            if now >= due
+                && now < event.start
+                && !state.has_fired(&event.occurrence_key, kind)
+            {
+                actions.push(FireAction {
+                    occurrence_key: event.occurrence_key.clone(),
+                    kind,
+                    due_at: due,
+                    suppressed: state.paused,
+                });
+            }
         }
 
         // T-0: due, not fired, event still ongoing (missed-while-asleep policy:
@@ -238,8 +270,10 @@ pub fn next_due(
         .iter()
         .filter(|e| alertable(e, cfg) && !state.is_ignored(&e.occurrence_key))
     {
-        if !state.has_fired(&e.occurrence_key, AlarmKind::TMinus5) {
-            consider(e.start - Duration::seconds(cfg.lead_secs));
+        for &offset in &cfg.reminder_offsets_secs {
+            if !state.has_fired(&e.occurrence_key, AlarmKind::Reminder(offset)) {
+                consider(e.start - Duration::seconds(offset));
+            }
         }
         if !state.has_fired(&e.occurrence_key, AlarmKind::TZero) {
             consider(e.start);
@@ -279,28 +313,95 @@ mod tests {
         AlarmConfig::default()
     }
 
+    /// A config with an explicit set of reminder offsets (seconds before start).
+    fn cfg_reminders(offsets: Vec<i64>) -> AlarmConfig {
+        AlarmConfig { reminder_offsets_secs: offsets, ..AlarmConfig::default() }
+    }
+
     fn kinds(actions: &[FireAction]) -> Vec<(String, AlarmKind)> {
         actions.iter().map(|a| (a.occurrence_key.clone(), a.kind)).collect()
     }
 
     #[test]
-    fn t5_then_t0_lifecycle() {
+    fn default_config_has_a_single_five_minute_reminder() {
+        assert_eq!(AlarmConfig::default().reminder_offsets_secs, vec![5 * 60]);
+    }
+
+    #[test]
+    fn reminder_then_start_lifecycle() {
         let events = vec![ev("m", 600, 1500)]; // starts T+10min
         let mut state = AlarmState::default();
 
         assert!(compute_actions(&events, t(0), &state, &cfg()).is_empty(), "too early");
 
         let at_t5 = compute_actions(&events, t(300), &state, &cfg());
-        assert_eq!(kinds(&at_t5), vec![("m".into(), AlarmKind::TMinus5)]);
-        state.mark_fired("m", AlarmKind::TMinus5, t(300));
+        assert_eq!(kinds(&at_t5), vec![("m".into(), AlarmKind::Reminder(300))]);
+        state.mark_fired("m", AlarmKind::Reminder(300), t(300));
 
-        assert!(compute_actions(&events, t(400), &state, &cfg()).is_empty(), "T-5 deduped");
+        assert!(compute_actions(&events, t(400), &state, &cfg()).is_empty(), "reminder deduped");
 
         let at_t0 = compute_actions(&events, t(600), &state, &cfg());
         assert_eq!(kinds(&at_t0), vec![("m".into(), AlarmKind::TZero)]);
         state.mark_fired("m", AlarmKind::TZero, t(600));
 
         assert!(compute_actions(&events, t(700), &state, &cfg()).is_empty(), "all done");
+    }
+
+    #[test]
+    fn multiple_reminders_each_fire_once_at_their_offset() {
+        // Two pre-event reminders: 20 minutes and 5 minutes before start.
+        let events = vec![ev("m", 1800, 3600)]; // starts T+30min
+        let mut state = AlarmState::default();
+        let cfg = cfg_reminders(vec![20 * 60, 5 * 60]);
+
+        assert!(compute_actions(&events, t(300), &state, &cfg).is_empty(), "before any reminder");
+
+        // T-20 (event start 1800 − 1200 = 600).
+        let at_20 = compute_actions(&events, t(600), &state, &cfg);
+        assert_eq!(kinds(&at_20), vec![("m".into(), AlarmKind::Reminder(1200))]);
+        state.mark_fired("m", AlarmKind::Reminder(1200), t(600));
+
+        // Still nothing until the 5-minute reminder is due.
+        assert!(compute_actions(&events, t(700), &state, &cfg).is_empty(), "T-20 deduped");
+
+        // T-5 (1800 − 300 = 1500).
+        let at_5 = compute_actions(&events, t(1500), &state, &cfg);
+        assert_eq!(kinds(&at_5), vec![("m".into(), AlarmKind::Reminder(300))]);
+        state.mark_fired("m", AlarmKind::Reminder(300), t(1500));
+
+        // T-0 start still fires.
+        let at_0 = compute_actions(&events, t(1800), &state, &cfg);
+        assert_eq!(kinds(&at_0), vec![("m".into(), AlarmKind::TZero)]);
+    }
+
+    #[test]
+    fn zero_reminders_still_fires_the_mandatory_start_alarm() {
+        // The user removed EVERY pre-event reminder. No reminder must fire, but the
+        // event-start alert is mandatory and must still fire at T-0.
+        let events = vec![ev("m", 600, 1500)];
+        let state = AlarmState::default();
+        let cfg = cfg_reminders(vec![]);
+
+        assert!(
+            compute_actions(&events, t(300), &state, &cfg).is_empty(),
+            "no pre-event reminder when reminders are empty",
+        );
+        let at_0 = compute_actions(&events, t(600), &state, &cfg);
+        assert_eq!(
+            kinds(&at_0),
+            vec![("m".into(), AlarmKind::TZero)],
+            "the start alarm is mandatory even with zero reminders",
+        );
+        // next_due must still surface the mandatory start.
+        assert_eq!(next_due(&events, t(0), &state, &cfg), Some(t(600)));
+    }
+
+    #[test]
+    fn reminder_tag_is_stable_per_offset() {
+        assert_eq!(AlarmKind::Reminder(300).tag(), "reminder_5");
+        assert_eq!(AlarmKind::Reminder(20 * 60).tag(), "reminder_20");
+        assert_eq!(AlarmKind::TZero.tag(), "t_zero");
+        assert_eq!(AlarmKind::Snooze.tag(), "snooze");
     }
 
     #[test]
@@ -396,32 +497,35 @@ mod tests {
         // NEW start, so it's a fresh key with fresh alarms. Old key simply never
         // matches future fetches.
         let mut state = AlarmState::default();
-        state.mark_fired("(id @ old)", AlarmKind::TMinus5, t(0));
+        state.mark_fired("(id @ old)", AlarmKind::Reminder(300), t(0));
         let moved = vec![AlarmEvent {
             occurrence_key: "(id @ new)".into(),
             ..ev("ignored", 3600, 5400)
         }];
         let actions = compute_actions(&moved, t(3600 - 300), &state, &cfg());
-        assert_eq!(kinds(&actions), vec![("(id @ new)".into(), AlarmKind::TMinus5)]);
+        assert_eq!(kinds(&actions), vec![("(id @ new)".into(), AlarmKind::Reminder(300))]);
     }
 
     #[test]
     fn next_due_picks_earliest_unfired() {
         let events = vec![ev("a", 600, 1200), ev("b", 900, 1500)];
         let mut state = AlarmState::default();
-        assert_eq!(next_due(&events, t(0), &state, &cfg()), Some(t(300))); // a's T-5
-        state.mark_fired("a", AlarmKind::TMinus5, t(300));
+        assert_eq!(next_due(&events, t(0), &state, &cfg()), Some(t(300))); // a's reminder
+        state.mark_fired("a", AlarmKind::Reminder(300), t(300));
         assert_eq!(next_due(&events, t(301), &state, &cfg()), Some(t(600))); // a's T-0
     }
 
     #[test]
-    fn config_lead_minutes_changes_t5_timing() {
+    fn config_reminder_offset_changes_timing() {
         let events = vec![ev("m", 600, 1500)];
         let state = AlarmState::default();
-        let one_min = AlarmConfig { lead_secs: 60, ..AlarmConfig::default() };
-        assert!(compute_actions(&events, t(300), &state, &one_min).is_empty(), "5min lead disabled");
+        let one_min = cfg_reminders(vec![60]);
+        assert!(
+            compute_actions(&events, t(300), &state, &one_min).is_empty(),
+            "5min reminder disabled — only a 1-min reminder is configured",
+        );
         let at_t1 = compute_actions(&events, t(540), &state, &one_min);
-        assert_eq!(kinds(&at_t1), vec![("m".into(), AlarmKind::TMinus5)]);
+        assert_eq!(kinds(&at_t1), vec![("m".into(), AlarmKind::Reminder(60))]);
         assert_eq!(next_due(&events, t(0), &state, &one_min), Some(t(540)));
     }
 
@@ -459,8 +563,12 @@ mod tests {
         let events = vec![ev("point", 300, 300)];
         let mut state = AlarmState::default();
         let at_t5 = compute_actions(&events, t(0), &state, &cfg());
-        assert_eq!(kinds(&at_t5), vec![("point".into(), AlarmKind::TMinus5)], "T-5 still works");
-        state.mark_fired("point", AlarmKind::TMinus5, t(0));
+        assert_eq!(
+            kinds(&at_t5),
+            vec![("point".into(), AlarmKind::Reminder(300))],
+            "reminder still works",
+        );
+        state.mark_fired("point", AlarmKind::Reminder(300), t(0));
         let at_t0 = compute_actions(&events, t(300), &state, &cfg());
         assert_eq!(kinds(&at_t0), vec![("point".into(), AlarmKind::TZero)], "T-0 fires despite 0 duration");
         state.mark_fired("point", AlarmKind::TZero, t(300));
@@ -491,7 +599,7 @@ mod tests {
 
         // At T-5: only the non-ignored occurrence fires.
         let at_t5 = compute_actions(&events, t(0), &state, &cfg());
-        assert_eq!(kinds(&at_t5), vec![("(r @ t2)".into(), AlarmKind::TMinus5)]);
+        assert_eq!(kinds(&at_t5), vec![("(r @ t2)".into(), AlarmKind::Reminder(300))]);
         // At start: still only the non-ignored one.
         let at_t0 = compute_actions(&events, t(300), &state, &cfg());
         assert_eq!(kinds(&at_t0), vec![("(r @ t2)".into(), AlarmKind::TZero)]);

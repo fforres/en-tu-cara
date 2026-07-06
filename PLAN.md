@@ -17,12 +17,14 @@ The core is built and guarded by `scripts/checkpoints/*-auto.sh`:
   occurrence expansion; RSVP/status fields; `EKEventStoreChanged` observer +
   ≤60 s poll backstop + refetch-on-wake.
 - **Alarm engine** — pure `compute_actions(events, now, state)` in
-  `alarm_core.rs`: T-5 and T-0; declined/canceled never alert; tentative alerts;
+  `alarm_core.rs`: 0–3 configurable pre-event reminders + a MANDATORY T-0 start
+  alarm (cannot be disabled); declined/canceled never alert; tentative alerts;
   snooze; pause; fire-on-wake-if-still-ongoing; dedup. Wall-clock arming with a
   windowed `latencyCritical` assertion; sleep/wake hooks.
 - **Takeover overlay** — one `tauri-nspanel` panel per display, above fullscreen
   apps and on all Spaces; event info, Join (only when a link exists), Dismiss,
-  Snooze 1m/5m, native NSSound; multiple events stack as cards.
+  "Remind me again in N min" (configurable default snooze), native NSSound;
+  multiple events stack as cards.
 - **Tray popover** — ongoing ("Xm remaining" + pie) and upcoming (day-grouped,
   today/all), calendar color/account, meeting links. Right-click → native menu.
 - **Settings** — registry-driven (sidebar + fuzzy search), live-applied/persisted.
