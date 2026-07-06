@@ -40,7 +40,7 @@ beforeEach(() => {
       return Promise.resolve([]);
     }
     if (cmd === "get_settings") {
-      return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+      return Promise.resolve({ theme: "frost-dark", default_snooze_minutes: 20 });
     }
     return Promise.resolve(undefined);
   });
@@ -51,6 +51,22 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
     render(<OverlayAlert />);
     expect(await screen.findByText("Standup")).toBeInTheDocument();
     expect(screen.getByText("1:1")).toBeInTheDocument();
+  });
+
+  it("renders one 'Remind me again' button using the configured default snooze duration", async () => {
+    render(<OverlayAlert />);
+    await screen.findByText("Standup");
+    // One snooze button per card, labelled with the default snooze duration (20).
+    const snoozeButtons = await screen.findAllByText("Remind me again in 20 minutes");
+    expect(snoozeButtons.length).toBe(2); // one per active alarm card
+    // Clicking snoozes THAT occurrence by the configured default (not a hardcoded value).
+    fireEvent.click(snoozeButtons[0]);
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("snooze_alarm", {
+        occurrenceKey: "(A @ t)",
+        minutes: 20,
+      }),
+    );
   });
 
   it("dismissing one card sends THAT occurrence_key, not a blanket dismiss-all", async () => {
@@ -123,7 +139,7 @@ describe("OverlayAlert — per-occurrence dismiss (overlapping meetings)", () =>
               ]);
         }
         if (cmd === "get_settings") {
-          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+          return Promise.resolve({ theme: "frost-dark", default_snooze_minutes: 20 });
         }
         return Promise.resolve(undefined);
       });
@@ -222,7 +238,7 @@ describe("OverlayAlert — calendar origins (where the event came from)", () => 
         case "list_calendars":
           return Promise.resolve(calendarList);
         case "get_settings":
-          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+          return Promise.resolve({ theme: "frost-dark", default_snooze_minutes: 20 });
         default:
           return Promise.resolve(undefined);
       }
@@ -283,7 +299,7 @@ describe("OverlayAlert — calendar origins (where the event came from)", () => 
         case "list_calendars":
           return Promise.reject(new Error("blip"));
         case "get_settings":
-          return Promise.resolve({ theme: "frost-dark", snooze_minutes: [1, 5] });
+          return Promise.resolve({ theme: "frost-dark", default_snooze_minutes: 20 });
         default:
           return Promise.resolve(undefined);
       }

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # CP7 integration tier: settings drive REAL engine behavior, end to end.
-#   Scenario A: lead_minutes=1 → the early alert's scheduled time is start-60s
+#   Scenario A: reminders=[1] → the early alert's scheduled time is start-60s
 #               (default would be start-300s) — proven from the fire log.
 #   Scenario B: alert_tentative=false + a tentative event → never fires;
 #               an accepted event alongside DOES fire (control).
@@ -22,10 +22,10 @@ cp "$DATA/settings.json" /tmp/cp7-settings-backup.json 2>/dev/null || echo "{}" 
 restore() { cp /tmp/cp7-settings-backup.json "$DATA/settings.json" 2>/dev/null || true; }
 trap restore EXIT
 
-echo "== CP7 A: lead_minutes=1 changes fire timing =="
+echo "== CP7 A: reminders=[1] changes fire timing =="
 rm -f "$DATA/fire-log.jsonl" "$DATA/state.json" "$DATA/overlay-log.jsonl"
 cat > "$DATA/settings.json" <<'EOF'
-{ "lead_minutes": 1 }
+{ "reminders": [1] }
 EOF
 ENTUCARA_TEST_MODE=1 ENTUCARA_SILENT=1 \
 ENTUCARA_TEST_EVENTS='[{"key":"(lead @ now)","title":"Lead test","start_in":20,"duration":60,"my_rsvp":"accepted"}]' \
@@ -38,7 +38,7 @@ from datetime import datetime
 recs = [json.loads(l) for l in open(sys.argv[1])]
 def p(m): print(f'  \033[32m✓\033[0m {m}')
 def f(m): print(f'  \033[31m✗ {m}\033[0m'); sys.exit(1)
-t5 = next((r for r in recs if r["kind"] == "t_minus_5"), None)
+t5 = next((r for r in recs if r["kind"] == "reminder_1"), None)
 if not t5: f("no early alert fired")
 # Event started fired_at-? — scheduled_for must equal start-60s. We know start =
 # scheduled_for + lead. Cross-check: with default lead=300 the scheduled_for would

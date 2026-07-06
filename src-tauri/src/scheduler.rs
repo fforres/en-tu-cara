@@ -43,7 +43,7 @@ impl Drop for ActivityAssertion {
 // Production loop (Phase 3)
 // ---------------------------------------------------------------------------
 
-use crate::alarm_core::{compute_actions, next_due, AlarmEvent, AlarmKind};
+use crate::alarm_core::{compute_actions, next_due, AlarmEvent};
 use crate::state::SharedState;
 use serde::Deserialize;
 use std::sync::Mutex;
@@ -375,7 +375,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
     let settings = app.state::<crate::settings::SettingsStore>().get();
     let cfg = crate::alarm_core::AlarmConfig {
-        lead_secs: i64::from(settings.lead_minutes) * 60,
+        reminder_offsets_secs: settings.reminders.iter().map(|&m| i64::from(m) * 60).collect(),
         alert_tentative: settings.alert_tentative,
         alert_pending: settings.alert_pending,
         only_video_events: settings.only_video_events,
@@ -412,15 +412,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     };
 
     for action in &actions {
-        crate::testmode::log_fire(
-            &action.occurrence_key,
-            match action.kind {
-                AlarmKind::TMinus5 => "t_minus_5",
-                AlarmKind::TZero => "t_zero",
-                AlarmKind::Snooze => "snooze",
-            },
-            action.due_at,
-        );
+        crate::testmode::log_fire(&action.occurrence_key, &action.kind.tag(), action.due_at);
         // Suppressed actions carry no overlay (dedup/policy) — record them fired
         // so they aren't reconsidered, and move on.
         if action.suppressed {
@@ -430,7 +422,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         let event = events.iter().find(|e| e.occurrence_key == action.occurrence_key);
         let payload = serde_json::json!({
             "occurrence_key": action.occurrence_key,
-            "kind": action.kind,
+            "kind": action.kind.tag(),
             "title": event.map(|e| e.title.clone()).unwrap_or_default(),
             "start": event.map(|e| e.start.to_rfc3339()),
             "end": event.map(|e| e.end.to_rfc3339()),
@@ -474,7 +466,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
                     "alarm_fired",
                     serde_json::json!({
                         "occurrence_hash": occurrence_hash,
-                        "kind": action.kind,
+                        "kind": action.kind.tag(),
                         "late_ms": late_ms,
                     }),
                 );
@@ -617,7 +609,7 @@ pub fn demo_alert(app: tauri::AppHandle) {
     let now = crate::testmode::clock::now();
     let payload = serde_json::json!({
         "occurrence_key": "(demo @ now)",
-        "kind": "t_minus5",
+        "kind": "reminder_45",
         "title": "Hello, I'm a demo event",
         "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
         "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
@@ -830,10 +822,10 @@ mod tests {
 
     #[test]
     fn dismissing_one_occurrence_keeps_the_other() {
-        // Two overlapping meetings on screen, meeting A with both T-5 and T-0
-        // cards. Dismissing A must drop BOTH A cards and leave B untouched.
+        // Two overlapping meetings on screen, meeting A with both a reminder and a
+        // T-0 card. Dismissing A must drop BOTH A cards and leave B untouched.
         let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
             serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
             serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
         ];
@@ -848,7 +840,7 @@ mod tests {
         // true → finish_one (close/re-render + stop sound); false → leave overlay
         // untouched. A key with ANY card on screen (even a different kind) is active.
         let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_minus_5"}),
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
             serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
         ];
         assert!(is_occurrence_active(&active, "(A @ t)"));

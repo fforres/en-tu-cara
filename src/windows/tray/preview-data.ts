@@ -244,7 +244,7 @@ export function mockOverlayData(now: number): {
   const alarms: MockAlarm[] = [
     {
       occurrence_key: "(eng @ t1)",
-      kind: "t_minus5",
+      kind: "reminder_5",
       title: "🔥 ENGINEERING 🔥 Sync",
       start: iso(now, 5),
       end: iso(now, 50),

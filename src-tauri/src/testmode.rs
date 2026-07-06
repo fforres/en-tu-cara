@@ -39,7 +39,7 @@ pub mod clock {
 pub struct FireRecord {
     /// Composite occurrence key: "(event_id, occurrence_start)".
     pub key: String,
-    /// "t_minus_5" | "t_zero" | "snooze"
+    /// "reminder_<minutes>" (e.g. "reminder_5") | "t_zero" | "snooze"
     pub kind: String,
     /// Wall-clock when the fire decision executed (real clock, for latency math).
     pub fired_at_wall: DateTime<Utc>,
@@ -125,12 +125,12 @@ mod tests {
     #[test]
     fn fire_log_records_in_order() {
         let t = Utc::now();
-        log_fire("(ev1, 2026-06-08T09:00:00Z)", "t_minus_5", t);
+        log_fire("(ev1, 2026-06-08T09:00:00Z)", "reminder_5", t);
         log_fire("(ev1, 2026-06-08T09:00:00Z)", "t_zero", t);
         let log = FIRE_LOG.lock().unwrap();
         assert!(log.len() >= 2);
         let kinds: Vec<_> = log.iter().map(|r| r.kind.as_str()).collect();
-        let pos5 = kinds.iter().position(|k| *k == "t_minus_5").unwrap();
+        let pos5 = kinds.iter().position(|k| *k == "reminder_5").unwrap();
         let pos0 = kinds.iter().position(|k| *k == "t_zero").unwrap();
         assert!(pos5 < pos0);
     }

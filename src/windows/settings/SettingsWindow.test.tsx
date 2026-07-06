@@ -18,10 +18,10 @@ import type { Settings } from "./registry";
 
 const DEFAULTS: Settings = {
   enabled_calendar_ids: null,
-  lead_minutes: 5,
+  reminders: [5],
   alert_sound: "Sosumi",
   sound_repeat_secs: 4,
-  snooze_minutes: [1, 5],
+  default_snooze_minutes: 5,
   alert_tentative: true,
   alert_pending: true,
   only_video_events: false,
@@ -94,7 +94,7 @@ describe("SettingsWindow", () => {
     fireEvent.change(screen.getByLabelText("Search settings"), { target: { value: "snooze" } });
     expect(await screen.findByText(/results? for/)).toBeInTheDocument();
     const rows = document.querySelectorAll("[data-setting-id]");
-    expect(rows[0].getAttribute("data-setting-id")).toBe("alerts.snooze-durations");
+    expect(rows[0].getAttribute("data-setting-id")).toBe("alerts.default-snooze");
     // <mark> highlight on the top label
     const mark = rows[0].querySelector("mark");
     expect(mark?.textContent?.toLowerCase()).toBe("snooze");
@@ -117,7 +117,7 @@ describe("SettingsWindow", () => {
       const call = invokeMock.mock.calls.find((call: unknown[]) => call[0] === "set_settings");
       expect(call).toBeTruthy();
       expect(call![1].settings.only_video_events).toBe(true);
-      expect(call![1].settings.lead_minutes).toBe(5); // rest untouched
+      expect(call![1].settings.reminders).toEqual([5]); // rest untouched
     });
   });
 
@@ -284,14 +284,51 @@ describe("SettingsWindow", () => {
     expect(screen.getByText(/double takeovers/i)).toBeInTheDocument();
   });
 
-  it("changing lead minutes clamps to range and persists", async () => {
+  it("editing a reminder clamps to range and persists", async () => {
     await renderSettings();
     fireEvent.click(screen.getByRole("button", { name: "Alerts" }));
-    const input = screen.getByLabelText("Alert me before the event");
+    const input = screen.getByLabelText("Reminder 1");
     fireEvent.change(input, { target: { value: "999" } });
     await waitFor(() => {
       const call = invokeMock.mock.calls.findLast((call: unknown[]) => call[0] === "set_settings");
-      expect(call![1].settings.lead_minutes).toBe(60); // clamped to max
+      expect(call![1].settings.reminders).toEqual([120]); // clamped to max
+    });
+  });
+
+  it("adds a second and third reminder, then hides Add at the three-reminder max", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Alerts" }));
+    // Start with one reminder (the default). Add two more → three inputs.
+    fireEvent.click(screen.getByRole("button", { name: "Add reminder" }));
+    await waitFor(() => expect(screen.getByLabelText("Reminder 2")).toBeInTheDocument());
+    fireEvent.click(screen.getByRole("button", { name: "Add reminder" }));
+    await waitFor(() => expect(screen.getByLabelText("Reminder 3")).toBeInTheDocument());
+    // At three reminders the Add button is gone (max of three pre-event reminders).
+    expect(screen.queryByRole("button", { name: "Add reminder" })).toBeNull();
+    const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "set_settings");
+    expect(call![1].settings.reminders).toHaveLength(3);
+  });
+
+  it("removing every reminder persists an empty list (only the start alert remains)", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Alerts" }));
+    fireEvent.click(screen.getByRole("button", { name: "Remove reminder 1" }));
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "set_settings");
+      expect(call![1].settings.reminders).toEqual([]);
+    });
+    // With zero reminders there is no reminder input, but the schedule is still valid.
+    expect(screen.queryByLabelText("Reminder 1")).toBeNull();
+  });
+
+  it("changing the default snooze duration persists independently of the reminders", async () => {
+    await renderSettings();
+    fireEvent.click(screen.getByRole("button", { name: "Alerts" }));
+    fireEvent.change(screen.getByLabelText("Default snooze duration"), { target: { value: "20" } });
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.findLast((c: unknown[]) => c[0] === "set_settings");
+      expect(call![1].settings.default_snooze_minutes).toBe(20);
+      expect(call![1].settings.reminders).toEqual([5]); // reminder schedule untouched
     });
   });
 

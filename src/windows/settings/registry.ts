@@ -27,10 +27,13 @@ export const SECTIONS: Array<{ id: SectionId; label: string }> = [
 /** Mirror of the Rust `Settings` struct (settings.rs). */
 export interface Settings {
   enabled_calendar_ids: string[] | null;
-  lead_minutes: number;
+  /** Pre-event reminders: minutes before start, 0–3 entries. Empty = only the
+   *  mandatory event-start alert fires. */
+  reminders: number[];
   alert_sound: string;
   sound_repeat_secs: number;
-  snooze_minutes: number[];
+  /** Default snooze duration (minutes) for "Remind me again". Independent from `reminders`. */
+  default_snooze_minutes: number;
   alert_tentative: boolean;
   alert_pending: boolean;
   only_video_events: boolean;
@@ -55,7 +58,7 @@ export type Control =
   | { kind: "toggle"; key: keyof Settings }
   | { kind: "number"; key: keyof Settings; min: number; max: number; unit: string }
   | { kind: "sound" } // sound picker + preview (alert_sound)
-  | { kind: "snooze-list" } // snooze_minutes editor
+  | { kind: "reminder-list" } // reminders editor (0–3 pre-event reminders)
   | { kind: "calendar-list" } // enabled_calendar_ids editor
   | { kind: "theme" } // theme picker + demo alert button
   | { kind: "select"; key: keyof Settings; options: Array<{ value: string; label: string }> }
@@ -89,13 +92,13 @@ export const REGISTRY: SettingDef[] = [
   },
   // ── Alerts ─────────────────────────────────────────────────────────────
   {
-    id: "alerts.lead-minutes",
+    id: "alerts.reminders",
     section: "alerts",
-    label: "Alert me before the event",
+    label: "Remind me before the event",
     description:
-      "How many minutes before a meeting the early alert appears. A second alert always fires at meeting start.",
-    keywords: ["lead", "before", "early", "minutes", "t-5", "warning"],
-    control: { kind: "number", key: "lead_minutes", min: 1, max: 60, unit: "min" },
+      "Notifications before a meeting starts — add up to three, each at its own time, or remove them all. A notification always fires at the exact start time regardless.",
+    keywords: ["lead", "before", "early", "minutes", "reminder", "reminders", "warning", "t-5"],
+    control: { kind: "reminder-list" },
   },
   {
     id: "alerts.sound",
@@ -114,12 +117,13 @@ export const REGISTRY: SettingDef[] = [
     control: { kind: "number", key: "sound_repeat_secs", min: 2, max: 60, unit: "sec" },
   },
   {
-    id: "alerts.snooze-durations",
+    id: "alerts.default-snooze",
     section: "alerts",
-    label: "Snooze durations",
-    description: "The snooze buttons shown on the alert, in minutes.",
-    keywords: ["snooze", "delay", "postpone", "later"],
-    control: { kind: "snooze-list" },
+    label: "Default snooze duration",
+    description:
+      'How long "Remind me again" postpones an alert. Independent from your reminder times — changing it never touches your reminder schedule.',
+    keywords: ["snooze", "remind me again", "delay", "postpone", "later"],
+    control: { kind: "number", key: "default_snooze_minutes", min: 1, max: 120, unit: "min" },
   },
   // ── Calendars ──────────────────────────────────────────────────────────
   {

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # CP3 automated tier: full alarm lifecycle in ~45 seconds, no real calendar.
 #   Injects an event starting +15 s via ENTUCARA_TEST_EVENTS, then asserts:
-#     1. T-5 fires on the first tick (we're already inside the lead window)
+#     1. the default 5-min reminder fires on the first tick (already in-window)
 #     2. Overlay panels appear on every display (layer 1000)
 #     3. T-0 fires at start (±5 s)
 #     4. A declined event injected alongside NEVER fires
@@ -51,7 +51,7 @@ def f(m): print(f'  \033[31m✗ {m}\033[0m'); sys.exit(1)
 
 e2e = [r for r in recs if r["key"] == "(e2e @ now)"]
 kinds = [r["kind"] for r in e2e]
-if kinds[:2] != ["t_minus_5", "t_zero"]: f(f"expected [t_minus_5, t_zero], got {kinds}")
+if kinds[:2] != ["reminder_5", "t_zero"]: f(f"expected [reminder_5, t_zero], got {kinds}")
 p(f"fire sequence correct: {kinds[:2]}")
 
 t0 = next(r for r in e2e if r["kind"] == "t_zero")
