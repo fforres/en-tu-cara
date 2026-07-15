@@ -386,6 +386,29 @@ pub(crate) fn build_alarm_config(settings: &crate::settings::Settings) -> crate:
 /// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
 fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
+
+    // Self-heal overlay visibility. A fired alarm stays "presented" in
+    // ACTIVE_ALARMS until the user dismisses it, but the takeover nspanels can be
+    // torn down out from under us — most importantly across SYSTEM SLEEP: on wake
+    // the display reconfiguration drops the panels while the (idempotent) sound
+    // loop keeps beating, leaving the user with an audible alarm and no way to
+    // stop it but force-quitting the app (reported). Re-assert on every tick so an
+    // active alarm ALWAYS has a visible, dismissable overlay: show_overlays
+    // re-fronts live panels and recreates lost ones (a freshly built overlay
+    // re-pulls ACTIVE_ALARMS on mount), and is a cheap no-op when the panels are
+    // already up. This rides the scheduler's existing tick-driven self-heal (first
+    // tick post-wake) rather than a fragile NSWorkspace observer — same reasoning
+    // as `looks_like_wake` below.
+    let alarm_presented = !lock_resilient(&ACTIVE_ALARMS).is_empty();
+    if alarm_presented {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(e) = crate::overlay::show_overlays(&handle) {
+                log::error!("overlay self-heal re-assert failed: {e}");
+            }
+        });
+    }
+
     let settings = app.state::<crate::settings::SettingsStore>().get();
     let cfg = build_alarm_config(&settings);
     let (events, fetch_outcome) = upcoming_alarm_events(&settings);
