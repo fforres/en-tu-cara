@@ -90,6 +90,16 @@ fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether `tick()` should re-assert the takeover overlay this pass: true exactly
+/// when an alarm is still presented. Drives the sleep/wake self-heal — a fired
+/// alarm the user hasn't dismissed can lose its panels across system sleep while
+/// the sound loop keeps beating, so we re-front (or recreate) them every tick; an
+/// empty set must stay a no-op so an overlay never pops out of nowhere. Pure, for
+/// testing.
+fn should_reassert_overlay(active_alarms: &[serde_json::Value]) -> bool {
+    !active_alarms.is_empty()
+}
+
 #[tauri::command]
 pub fn get_active_alarms() -> Vec<serde_json::Value> {
     lock_resilient(&ACTIVE_ALARMS).clone()
@@ -399,7 +409,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     // already up. This rides the scheduler's existing tick-driven self-heal (first
     // tick post-wake) rather than a fragile NSWorkspace observer — same reasoning
     // as `looks_like_wake` below.
-    let alarm_presented = !lock_resilient(&ACTIVE_ALARMS).is_empty();
+    let alarm_presented = should_reassert_overlay(&lock_resilient(&ACTIVE_ALARMS));
     if alarm_presented {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
@@ -817,6 +827,22 @@ mod tests {
         assert!(looks_like_wake(30, 120));
         assert!(looks_like_wake(30, 3600));
         assert!(looks_like_wake(1, 600));
+    }
+
+    #[test]
+    fn reasserts_overlay_only_when_an_alarm_is_presented() {
+        // tick()'s sleep/wake self-heal: re-front the takeover overlay IFF a fired
+        // alarm is still on screen. Empty set → no-op (never conjure an overlay);
+        // any presented card → re-assert, so a panel dropped across sleep comes
+        // back instead of an audible, un-dismissable looping alarm.
+        assert!(!should_reassert_overlay(&[]), "nothing presented → no re-assert");
+        let presented = vec![
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
+        ];
+        assert!(
+            should_reassert_overlay(&presented),
+            "a presented alarm → re-assert"
+        );
     }
 
     #[test]
