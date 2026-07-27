@@ -108,6 +108,75 @@ fn needs_replacing(current: NSRect, target: NSRect) -> bool {
         || off(current.size.height, target.size.height)
 }
 
+/// What a re-assert should do to the panels: which to re-frame where, and which one
+/// should hold key focus afterwards.
+#[derive(Debug, Default, PartialEq)]
+struct Reframe {
+    /// `(label, new frame)` — only panels that actually need moving.
+    moves: Vec<(String, NSRect)>,
+    /// The panel that should take key status: the one now covering the PRIMARY
+    /// screen. `None` when there is no screen to put anything on.
+    key_panel: Option<String>,
+}
+
+/// Decide the re-frame from the panels we have, the screens that exist NOW, and
+/// where each panel currently sits. Pure — this is the whole display-change policy,
+/// and the only reason it can be tested at all is that it takes plain frames
+/// instead of an `AppHandle` full of live windows.
+///
+/// Two jobs, and BOTH matter to the user:
+///   - Move panels whose frame no longer matches their screen. A panel stranded on
+///     coordinates no display covers is invisible, so re-fronting it shows nothing
+///     while the alert sound keeps going.
+///   - Re-elect the key panel. AppKit lists the primary (menu-bar) display first,
+///     so the panel paired with screen 0 takes focus. This must be recomputed on
+///     every pass: if focus stays on a panel whose display was unplugged,
+///     `show_and_make_key` hands Esc/Enter to an invisible window and keyboard
+///     dismissal silently dies.
+///
+/// Panels past the end of the screen list (a display was DISCONNECTED mid-alarm)
+/// are deliberately left where they are — invisible and harmless — because moving
+/// them too would stack duplicate cards onto the one display the user can see.
+fn plan_reframe(ordered: &[&str], screens: &[NSRect], current: &[Option<NSRect>]) -> Reframe {
+    let moves = ordered
+        .iter()
+        .zip(screens)
+        .zip(current)
+        .filter(|((_, target), now)| now.is_none_or(|now| needs_replacing(now, **target)))
+        .map(|((label, target), _)| ((*label).to_string(), *target))
+        .collect();
+    Reframe {
+        moves,
+        // Only elect a panel that has a screen to be on.
+        key_panel: screens.first().and(ordered.first()).map(|l| (*l).to_string()),
+    }
+}
+
+/// This panel's current frame in AppKit points, or None if it can't be read.
+fn panel_frame(app: &AppHandle, label: &str) -> Option<NSRect> {
+    Some(with_ns_window(app, label)?.frame())
+}
+
+/// Place this panel's native frame. See `resync_overlay_geometry` for why this goes
+/// through `NSWindow` and never `window.set_position` / `set_size`.
+fn set_panel_frame(app: &AppHandle, label: &str, frame: NSRect) {
+    if let Some(ns_window) = with_ns_window(app, label) {
+        ns_window.setFrame_display(frame, false);
+    }
+}
+
+/// Borrow a panel's live `NSWindow`. Main thread only.
+fn with_ns_window<'a>(app: &AppHandle, label: &str) -> Option<&'a objc2_app_kit::NSWindow> {
+    let ptr = app.get_webview_window(label)?.ns_window().ok()?;
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: ns_window() hands back this window's live NSWindow, and every caller
+    // here runs on the main thread (resync_overlay_geometry holds a
+    // MainThreadMarker). We only read or set its frame.
+    Some(unsafe { &*(ptr as *const objc2_app_kit::NSWindow) })
+}
+
 /// Snap live overlay panels back onto the CURRENT display layout, and return the
 /// label now covering the primary screen (the one that should hold key focus).
 ///
@@ -135,44 +204,26 @@ fn needs_replacing(current: NSRect, target: NSRect) -> bool {
 /// stacking them onto a surviving screen would pile duplicate cards on the one
 /// display the user can actually see.
 fn resync_overlay_geometry(app: &AppHandle, live: &[String]) -> Option<String> {
-    use objc2_app_kit::NSWindow;
-
     let mtm = MainThreadMarker::new()?;
     let screens = NSScreen::screens(mtm);
-    let ordered = sorted_overlay_labels(live);
-    // AppKit orders `screens` with the primary (menu-bar) display first, so the
-    // panel paired with index 0 is the one that should take key status.
-    let main_label = ordered.first().map(|l| (*l).to_string());
+    let screen_frames: Vec<NSRect> =
+        (0..screens.count()).map(|i| screens.objectAtIndex(i).frame()).collect();
 
-    for (idx, label) in ordered.iter().enumerate().take(screens.count()) {
-        let target = screens.objectAtIndex(idx).frame();
-        let Some(window) = app.get_webview_window(label) else {
-            continue;
-        };
-        let Ok(ptr) = window.ns_window() else {
-            continue;
-        };
-        if ptr.is_null() {
-            continue;
-        }
-        // SAFETY: ns_window() hands back this window's live NSWindow; we hold a
-        // MainThreadMarker (obtained above) and only read/set its frame.
-        let ns_window: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
-        let current = ns_window.frame();
-        if !needs_replacing(current, target) {
-            continue;
-        }
+    let ordered = sorted_overlay_labels(live);
+    let current: Vec<Option<NSRect>> = ordered.iter().map(|l| panel_frame(app, l)).collect();
+
+    let plan = plan_reframe(&ordered, &screen_frames, &current);
+    for (label, frame) in &plan.moves {
         log::info!(
-            "overlay {label}: display layout changed under it — re-framing to \
-             {},{} {}x{}",
-            target.origin.x,
-            target.origin.y,
-            target.size.width,
-            target.size.height
+            "overlay {label}: display layout changed under it — re-framing to {},{} {}x{}",
+            frame.origin.x,
+            frame.origin.y,
+            frame.size.width,
+            frame.size.height
         );
-        ns_window.setFrame_display(target, false);
+        set_panel_frame(app, label, *frame);
     }
-    main_label
+    plan.key_panel
 }
 
 /// Spawn one takeover panel per connected display. Returns the labels created.
@@ -441,6 +492,124 @@ mod tests {
         assert!(!needs_replacing(frame(0.2, -0.1, 2560.3, 1439.8), target));
         // …but a visible fraction of a point still counts.
         assert!(needs_replacing(frame(0.0, 0.0, 2559.0, 1440.0), target));
+    }
+
+    // -----------------------------------------------------------------
+    // The display-change policy: which panels move, and who holds focus.
+    // -----------------------------------------------------------------
+
+    fn plan(labels: &[&str], screens: &[NSRect], current: &[Option<NSRect>]) -> Reframe {
+        plan_reframe(labels, screens, current)
+    }
+
+    #[test]
+    fn a_steady_state_reassert_moves_nothing() {
+        // The common case by far: a re-assert every tick with nothing changed. Any
+        // move here is a per-tick setFrame plus an INFO line on a recurring path.
+        let screen = frame(0.0, 0.0, 2560.0, 1440.0);
+        let p = plan(&["overlay-0"], &[screen], &[Some(screen)]);
+        assert!(p.moves.is_empty(), "nothing to do; got {:?}", p.moves);
+        assert_eq!(p.key_panel.as_deref(), Some("overlay-0"));
+    }
+
+    #[test]
+    fn a_resolution_change_across_sleep_re_frames_the_panel() {
+        // Woke up in a different display mode: the old frame no longer covers the
+        // screen, so the card is clipped or off-screen while the sound loops.
+        let now = frame(0.0, 0.0, 1920.0, 1080.0);
+        let was = frame(0.0, 0.0, 3456.0, 2234.0);
+        let p = plan(&["overlay-0"], &[now], &[Some(was)]);
+        assert_eq!(p.moves, vec![("overlay-0".to_string(), now)]);
+    }
+
+    #[test]
+    fn the_key_panel_is_re_elected_away_from_an_unplugged_display() {
+        // THE keyboard-dismissal bug. The external display was primary, so
+        // overlay-1 held key status. It gets unplugged across sleep. If focus stays
+        // on overlay-1 — which is now on no screen at all — `show_and_make_key`
+        // hands Esc/Enter to an invisible window and keyboard dismissal silently
+        // dies while the alert keeps sounding.
+        let builtin = frame(0.0, 0.0, 1512.0, 982.0);
+        let stale_0 = frame(0.0, 0.0, 1512.0, 982.0);
+        let stale_1 = frame(-2560.0, 0.0, 2560.0, 1440.0);
+
+        let p = plan(&["overlay-0", "overlay-1"], &[builtin], &[Some(stale_0), Some(stale_1)]);
+
+        assert_eq!(
+            p.key_panel.as_deref(),
+            Some("overlay-0"),
+            "focus must move to a panel that is actually on a screen"
+        );
+        assert!(
+            p.moves.iter().all(|(label, _)| label != "overlay-1"),
+            "the stranded panel is left alone rather than stacked onto the survivor"
+        );
+    }
+
+    #[test]
+    fn a_panel_stranded_on_a_vanished_screen_is_pulled_back_onto_a_real_one() {
+        // One panel, and the display it was on is gone. It must be re-framed onto
+        // the surviving screen — re-fronting it where it is shows the user nothing.
+        let surviving = frame(0.0, 0.0, 1512.0, 982.0);
+        let stranded = frame(-2560.0, 0.0, 2560.0, 1440.0);
+        let p = plan(&["overlay-0"], &[surviving], &[Some(stranded)]);
+        assert_eq!(p.moves, vec![("overlay-0".to_string(), surviving)]);
+    }
+
+    #[test]
+    fn a_display_attached_mid_alarm_gets_no_invented_panel() {
+        // One panel, two screens now. We re-place what we have and stop: building a
+        // window in the reuse path is unverified on the alarm-critical path, and an
+        // ObjC abort there would kill every future alarm. The new display simply
+        // goes uncovered until the next fire. Documented in PLAN.md.
+        let a = frame(0.0, 0.0, 1512.0, 982.0);
+        let b = frame(1512.0, 0.0, 2560.0, 1440.0);
+        let p = plan(&["overlay-0"], &[a, b], &[Some(a)]);
+        assert!(p.moves.is_empty(), "overlay-0 is already right; nothing invented for screen b");
+        assert_eq!(p.key_panel.as_deref(), Some("overlay-0"));
+    }
+
+    #[test]
+    fn a_window_that_will_not_report_its_frame_is_re_framed_defensively() {
+        // Reading the frame failed. Treating that as "it's fine" risks leaving an
+        // alarm stranded off-screen; a redundant setFrame costs nothing.
+        let screen = frame(0.0, 0.0, 2560.0, 1440.0);
+        let p = plan(&["overlay-0"], &[screen], &[None]);
+        assert_eq!(p.moves, vec![("overlay-0".to_string(), screen)]);
+    }
+
+    #[test]
+    fn no_readable_screens_means_no_moves_and_no_focus_election() {
+        // NSScreen came back empty. This must never be read as "move everything to
+        // the origin" or "focus a panel that has no screen" — the re-assert still
+        // re-fronts, it just doesn't move or re-key anything.
+        let p = plan(&["overlay-0", "overlay-1"], &[], &[None, None]);
+        assert!(p.moves.is_empty());
+        assert_eq!(p.key_panel, None, "nothing can hold focus when there is no screen");
+    }
+
+    #[test]
+    fn panels_are_paired_with_screens_in_numeric_label_order() {
+        // Ties the sort to the policy: `webview_windows()` is unordered, and a
+        // lexical sort would pair overlay-10 with the FIRST screen — re-framing
+        // every panel onto the wrong display AND electing the wrong key panel.
+        let live = labels(&["overlay-10", "overlay-2", "overlay-0"]);
+        let ordered = sorted_overlay_labels(&live);
+        let screens = [
+            frame(0.0, 0.0, 100.0, 100.0),
+            frame(100.0, 0.0, 100.0, 100.0),
+            frame(200.0, 0.0, 100.0, 100.0),
+        ];
+        let p = plan(&ordered, &screens, &[None, None, None]);
+        assert_eq!(
+            p.moves,
+            vec![
+                ("overlay-0".to_string(), screens[0]),
+                ("overlay-2".to_string(), screens[1]),
+                ("overlay-10".to_string(), screens[2]),
+            ]
+        );
+        assert_eq!(p.key_panel.as_deref(), Some("overlay-0"), "the primary screen's panel");
     }
 
     #[test]
