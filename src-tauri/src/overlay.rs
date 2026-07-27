@@ -11,6 +11,10 @@
 
 #![cfg(target_os = "macos")]
 
+use crate::scheduler::lock_resilient;
+use objc2_app_kit::NSScreen;
+// NSRect + MainThreadMarker are already in scope from the `tauri_panel!` expansion
+// below; importing them again is a duplicate-definition error.
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_nspanel::{tauri_panel, CollectionBehavior, ManagerExt, PanelLevel, StyleMask, WebviewWindowExt};
 
@@ -78,104 +82,97 @@ fn overlay_index(label: &str) -> Option<usize> {
 }
 
 /// Overlay labels ordered by creation index. `webview_windows()` hands back an
-/// unordered map, so raw key order must NOT be trusted to line up with the
-/// monitor list — and a lexical sort would put `overlay-10` before `overlay-2`,
-/// silently pairing panels with the wrong display. Pure, for testing.
-fn sorted_overlay_labels(labels: &[String]) -> Vec<String> {
-    let mut sorted: Vec<String> = labels.to_vec();
+/// unordered map, so raw key order must NOT be trusted to line up with the screen
+/// list — and a lexical sort would put `overlay-10` before `overlay-2`, silently
+/// pairing panels with the wrong display. Pure, for testing.
+fn sorted_overlay_labels(labels: &[String]) -> Vec<&str> {
+    let mut sorted: Vec<&str> = labels.iter().map(String::as_str).collect();
     sorted.sort_by_key(|l| overlay_index(l).unwrap_or(usize::MAX));
     sorted
 }
 
-/// Pair each live overlay label with the index of the monitor it should occupy
-/// now. Labels past the end of the monitor list (a display was DISCONNECTED
-/// mid-alarm) deliberately get no target: leaving them where they are costs
-/// nothing (they're on no screen, so invisible), whereas stacking them onto an
-/// occupied screen would pile duplicate cards on one display. Pure, for testing.
-fn reposition_targets(sorted_labels: &[String], monitor_count: usize) -> Vec<(String, usize)> {
-    sorted_labels.iter().take(monitor_count).cloned().zip(0..monitor_count).collect()
-}
-
-/// A panel's frame: where it should sit and how big, in physical pixels.
-type Frame = (tauri::PhysicalPosition<i32>, tauri::PhysicalSize<u32>);
-
-/// What to do with one overlay panel on a re-assert pass.
-#[derive(Debug, PartialEq, Eq)]
-enum Placement {
-    /// Correctly placed and unchanged — issue no setFrame at all.
-    LeaveAlone,
-    /// Re-place it. `announce` is true only on a real display-layout EDGE, so the
-    /// log line stays once-per-change instead of once-per-tick.
-    Replace { announce: bool },
-}
-
-/// Decide a single panel's placement from the target frame, what the window
-/// reports now, and the frame we last applied to it.
+/// Does a panel sitting at `current` need moving to cover `target`?
 ///
-/// Two independent reasons to act: the LAYOUT changed under us (target ≠ what we
-/// last applied — the sleep/wake case), or the panel drifted off its target for
-/// any other reason. Only the first is worth a log line: `resync_overlay_geometry`
-/// runs on EVERY scheduler tick while an alarm is up, and the obs layer ships
-/// INFO+ to PostHog Logs, so a per-tick line would be event spam (see
-/// src-tauri/CLAUDE.md "Do NOT"). `observed: None` (the window wouldn't report its
-/// frame) counts as drifted — better one redundant setFrame than a panel stranded
-/// offscreen. Pure, for testing.
-fn placement_for(target: Frame, observed: Option<Frame>, last_applied: Option<Frame>) -> Placement {
-    let layout_changed = last_applied != Some(target);
-    let drifted = observed != Some(target);
-    if !layout_changed && !drifted {
-        return Placement::LeaveAlone;
-    }
-    Placement::Replace { announce: layout_changed }
+/// Both are `NSWindow`/`NSScreen` frames — AppKit points, bottom-left origin, ONE
+/// coordinate space (see `resync_overlay_geometry` on why we never touch physical
+/// pixels here). A sub-point tolerance is what makes this converge: after a
+/// successful `setFrame:` the two agree, so a correctly-placed panel issues no
+/// further frame changes and — load-bearing — no further log lines, on a path that
+/// runs every scheduler tick while an alarm is up. Pure, for testing.
+fn needs_replacing(current: NSRect, target: NSRect) -> bool {
+    const TOLERANCE: f64 = 0.5; // sub-point: invisible, but absorbs f64 noise.
+    let off = |a: f64, b: f64| (a - b).abs() > TOLERANCE;
+    off(current.origin.x, target.origin.x)
+        || off(current.origin.y, target.origin.y)
+        || off(current.size.width, target.size.width)
+        || off(current.size.height, target.size.height)
 }
 
-/// The frame we last applied to each overlay label, so `placement_for` can tell a
-/// real layout change from steady state. Keyed by label; entries outlive a panel
-/// harmlessly (a rebuilt panel is created at the right frame, so it matches).
-static APPLIED_FRAMES: std::sync::Mutex<Option<std::collections::HashMap<String, Frame>>> =
-    std::sync::Mutex::new(None);
-
-/// Snap live overlay panels back onto the CURRENT display layout.
+/// Snap live overlay panels back onto the CURRENT display layout, and return the
+/// label now covering the primary screen (the one that should hold key focus).
 ///
-/// Panels are built one-per-NSScreen with ABSOLUTE frames at fire time. Across
+/// Panels are built one-per-`NSScreen` with ABSOLUTE frames at fire time. Across
 /// system sleep that layout can change under them — lid closed, external display
 /// unplugged, resolution switched on wake — and a panel whose frame belongs to a
 /// screen that no longer exists is invisible, so `order_front_regardless` alone
-/// re-fronts nothing the user can see (the force-quit report). Re-set the frame
-/// first, then re-front.
-fn resync_overlay_geometry(app: &AppHandle, live: &[String]) {
-    let Ok(monitors) = app.available_monitors() else {
-        return; // can't read the layout — leave the panels alone, still re-front.
-    };
-    let mut applied = APPLIED_FRAMES.lock().unwrap_or_else(|e| e.into_inner());
-    let applied = applied.get_or_insert_with(std::collections::HashMap::new);
+/// re-fronts nothing the user can see (the force-quit report). Re-frame first,
+/// then re-front.
+///
+/// Driven through the native `NSWindow` frame rather than `window.set_position` /
+/// `set_size`, for the reason `tray::position_under_tray` already documents: those
+/// go through tao, which converts with the SOURCE window's scale factor
+/// (`to_logical(self.scale_factor())`), so moving a panel between displays of
+/// DIFFERENT scale — a retina built-in and a 1x external, i.e. the exact case this
+/// function exists for — lands it at half/double coordinates and never converges,
+/// re-issuing a futile frame change every tick. Working entirely in AppKit points
+/// keeps one consistent space with no scale-factor mixing. (`tray.rs` has the same
+/// `ns_window()` → `setFrame:display:` shape; worth extracting to a shared helper
+/// if a third caller appears.)
+///
+/// Screens past the end of the panel list get no panel, and panels past the end of
+/// the screen list (a display was DISCONNECTED mid-alarm) are deliberately left
+/// where they are: they're on no screen, so invisible and harmless, whereas
+/// stacking them onto a surviving screen would pile duplicate cards on the one
+/// display the user can actually see.
+fn resync_overlay_geometry(app: &AppHandle, live: &[String]) -> Option<String> {
+    use objc2_app_kit::NSWindow;
 
-    for (label, idx) in reposition_targets(&sorted_overlay_labels(live), monitors.len()) {
-        let (Some(window), Some(monitor)) = (app.get_webview_window(&label), monitors.get(idx))
-        else {
+    let mtm = MainThreadMarker::new()?;
+    let screens = NSScreen::screens(mtm);
+    let ordered = sorted_overlay_labels(live);
+    // AppKit orders `screens` with the primary (menu-bar) display first, so the
+    // panel paired with index 0 is the one that should take key status.
+    let main_label = ordered.first().map(|l| (*l).to_string());
+
+    for (idx, label) in ordered.iter().enumerate().take(screens.count()) {
+        let target = screens.objectAtIndex(idx).frame();
+        let Some(window) = app.get_webview_window(label) else {
             continue;
         };
-        let target: Frame = (*monitor.position(), *monitor.size());
-        let observed = window.outer_position().ok().zip(window.outer_size().ok());
-
-        let Placement::Replace { announce } =
-            placement_for(target, observed, applied.get(&label).copied())
-        else {
+        let Ok(ptr) = window.ns_window() else {
             continue;
         };
-        if announce {
-            log::info!(
-                "overlay {label}: display layout changed under it — re-placing at {},{} {}x{}",
-                target.0.x,
-                target.0.y,
-                target.1.width,
-                target.1.height
-            );
+        if ptr.is_null() {
+            continue;
         }
-        let _ = window.set_position(target.0);
-        let _ = window.set_size(target.1);
-        applied.insert(label, target);
+        // SAFETY: ns_window() hands back this window's live NSWindow; we hold a
+        // MainThreadMarker (obtained above) and only read/set its frame.
+        let ns_window: &NSWindow = unsafe { &*(ptr as *const NSWindow) };
+        let current = ns_window.frame();
+        if !needs_replacing(current, target) {
+            continue;
+        }
+        log::info!(
+            "overlay {label}: display layout changed under it — re-framing to \
+             {},{} {}x{}",
+            target.origin.x,
+            target.origin.y,
+            target.size.width,
+            target.size.height
+        );
+        ns_window.setFrame_display(target, false);
     }
+    main_label
 }
 
 /// Spawn one takeover panel per connected display. Returns the labels created.
@@ -194,13 +191,20 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .cloned()
         .collect();
     if !live.is_empty() {
-        resync_overlay_geometry(app, &live);
+        // Re-elect the key panel to whichever one now covers the primary screen.
+        // MAIN_OVERLAY was previously written ONLY at creation, so after a display
+        // change it could still name a panel left stranded on a vanished screen —
+        // and `show_and_make_key` below would hand Esc/Enter to an invisible
+        // window, killing keyboard dismissal while the sound kept looping.
+        if let Some(main) = resync_overlay_geometry(app, &live) {
+            *lock_resilient(&MAIN_OVERLAY) = Some(main);
+        }
         for label in &live {
             if let Ok(panel) = app.get_webview_panel(label) {
                 panel.order_front_regardless();
             }
         }
-        if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if let Some(main_label) = lock_resilient(&MAIN_OVERLAY).as_ref() {
             if let Ok(panel) = app.get_webview_panel(main_label) {
                 panel.show_and_make_key();
             }
@@ -255,7 +259,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
         .build()?;
 
         if is_primary {
-            *MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()) = Some(label.clone());
+            *lock_resilient(&MAIN_OVERLAY) = Some(label.clone());
         }
         let panel = window.to_panel::<OverlayPanel>()?;
         panel.set_level(PanelLevel::ScreenSaver.value());
@@ -286,7 +290,7 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     // Autofocus the principal display: the main panel takes key status so Esc /
     // Enter work immediately. Nonactivating style means the APP still doesn't
     // activate — focus-of-record stays with whatever the user was using.
-    if let Some(main_label) = MAIN_OVERLAY.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+    if let Some(main_label) = lock_resilient(&MAIN_OVERLAY).as_ref() {
         if let Ok(panel) = app.get_webview_panel(main_label) {
             panel.show_and_make_key();
         }
@@ -298,10 +302,19 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     Ok(labels)
 }
 
-/// Close every overlay panel.
+/// Take the overlay down: stop the sound, drop the presented card set, close every
+/// panel.
+///
+/// Clearing ACTIVE_ALARMS is part of the contract, not an extra. Since the
+/// scheduler re-asserts the overlay every tick while a card is presented,
+/// "panels closed but ACTIVE_ALARMS non-empty" is a SELF-RESURRECTING state — the
+/// next tick would rebuild the panels and restart the sound. Every caller today
+/// clears the set first (this is then a no-op), but this is an exposed IPC command,
+/// so it must not depend on callers to hold the invariant.
 #[tauri::command]
 pub fn close_overlays(app: AppHandle) {
     crate::sound::stop_alert_loop();
+    lock_resilient(&crate::scheduler::ACTIVE_ALARMS).clear();
     write_overlay_state(&[]);
     for (label, _) in app.webview_windows() {
         if label.starts_with(OVERLAY_LABEL_PREFIX) {
@@ -372,61 +385,27 @@ mod tests {
         // `overlay-10` with the FIRST monitor and re-places every panel onto the
         // wrong screen — a corruption that only shows up on the machines hardest
         // to test on. Pin the numeric order.
-        let sorted = sorted_overlay_labels(&labels(&[
-            "overlay-10",
-            "overlay-2",
-            "overlay-0",
-            "overlay-1",
-        ]));
-        assert_eq!(sorted, labels(&["overlay-0", "overlay-1", "overlay-2", "overlay-10"]));
+        let live = labels(&["overlay-10", "overlay-2", "overlay-0", "overlay-1"]);
+        assert_eq!(
+            sorted_overlay_labels(&live),
+            ["overlay-0", "overlay-1", "overlay-2", "overlay-10"]
+        );
     }
 
     #[test]
     fn unparseable_labels_sort_last_and_never_displace_a_real_panel() {
         // Defensive: an overlay-prefixed label without a numeric suffix must not
-        // land at index 0 and steal the primary display's placement.
-        let sorted = sorted_overlay_labels(&labels(&["overlay-weird", "overlay-1", "overlay-0"]));
-        assert_eq!(sorted, labels(&["overlay-0", "overlay-1", "overlay-weird"]));
+        // land at index 0 and steal the primary display's placement (which is also
+        // the label elected to hold key focus).
+        let live = labels(&["overlay-weird", "overlay-1", "overlay-0"]);
+        assert_eq!(sorted_overlay_labels(&live), ["overlay-0", "overlay-1", "overlay-weird"]);
     }
 
-    #[test]
-    fn steady_state_pairs_each_panel_with_its_own_display() {
-        // The overwhelmingly common re-assert: nothing changed since fire time.
-        let targets = reposition_targets(&labels(&["overlay-0", "overlay-1"]), 2);
-        assert_eq!(targets, vec![("overlay-0".to_string(), 0), ("overlay-1".to_string(), 1)]);
-    }
-
-    #[test]
-    fn a_display_disconnected_mid_alarm_leaves_the_orphan_panel_alone() {
-        // Two panels, one screen left (lid closed / dock unplugged across sleep).
-        // overlay-0 is re-placed onto the surviving screen; overlay-1 gets NO
-        // target on purpose — it's on no screen, so it's invisible and harmless,
-        // whereas re-placing it too would stack a duplicate card on the one
-        // display the user can actually see.
-        let targets = reposition_targets(&labels(&["overlay-0", "overlay-1"]), 1);
-        assert_eq!(targets, vec![("overlay-0".to_string(), 0)]);
-    }
-
-    #[test]
-    fn a_display_attached_mid_alarm_does_not_invent_a_panel_for_it() {
-        // One panel, two screens now. We re-place the panel we have and stop:
-        // building a window in the REUSE path is the documented ObjC-abort
-        // hazard (close() is async, labels stay taken), so the new display simply
-        // goes uncovered until the next fire rebuilds the set.
-        let targets = reposition_targets(&labels(&["overlay-0"]), 2);
-        assert_eq!(targets, vec![("overlay-0".to_string(), 0)]);
-    }
-
-    #[test]
-    fn no_displays_readable_means_no_repositioning_at_all() {
-        // available_monitors() coming back empty must never be read as "move every
-        // panel to index 0" — the re-assert still re-fronts, it just doesn't move
-        // anything.
-        assert!(reposition_targets(&labels(&["overlay-0", "overlay-1"]), 0).is_empty());
-    }
-
-    fn frame(x: i32, y: i32, w: u32, h: u32) -> Frame {
-        (tauri::PhysicalPosition::new(x, y), tauri::PhysicalSize::new(w, h))
+    fn frame(x: f64, y: f64, w: f64, h: f64) -> NSRect {
+        NSRect::new(
+            objc2_foundation::NSPoint::new(x, y),
+            objc2_foundation::NSSize::new(w, h),
+        )
     }
 
     #[test]
@@ -434,56 +413,38 @@ mod tests {
         // The overwhelmingly common case: a re-assert every tick while an alarm is
         // up, nothing changed. No setFrame (no flicker) and — critically — NO log
         // line, because the obs layer ships INFO+ to PostHog Logs and this path
-        // runs on every tick.
-        let f = frame(0, 0, 2560, 1440);
-        assert_eq!(placement_for(f, Some(f), Some(f)), Placement::LeaveAlone);
+        // runs on every tick. This is why the comparison has to CONVERGE.
+        let f = frame(0.0, 0.0, 2560.0, 1440.0);
+        assert!(!needs_replacing(f, f));
     }
 
     #[test]
-    fn a_resolution_change_across_sleep_re_places_and_announces_once() {
-        // Woke up on a different mode: the panel's old frame no longer covers the
-        // screen. Re-place AND log — this is a real edge worth having in the file
-        // when triaging "the alarm was audible but invisible".
-        let (was, now) = (frame(0, 0, 3456, 2234), frame(0, 0, 1920, 1080));
-        assert_eq!(
-            placement_for(now, Some(was), Some(was)),
-            Placement::Replace { announce: true }
-        );
-        // …and the tick right after, having recorded it, goes quiet again.
-        assert_eq!(placement_for(now, Some(now), Some(now)), Placement::LeaveAlone);
+    fn a_resolution_change_across_sleep_is_detected() {
+        // Woke up on a different display mode: the panel's frame no longer covers
+        // the screen, so the card is clipped or offscreen while the sound loops.
+        let was = frame(0.0, 0.0, 3456.0, 2234.0);
+        let now = frame(0.0, 0.0, 1920.0, 1080.0);
+        assert!(needs_replacing(was, now));
     }
 
     #[test]
-    fn a_panel_that_drifted_off_target_is_fixed_without_a_log_line() {
-        // Same layout as we last applied, but the window is no longer there. Still
-        // self-heal it — silently, since this can recur per-tick and must not
-        // become PostHog event spam.
-        let target = frame(0, 0, 2560, 1440);
-        assert_eq!(
-            placement_for(target, Some(frame(-2560, 0, 2560, 1440)), Some(target)),
-            Placement::Replace { announce: false }
-        );
+    fn a_panel_stranded_on_a_vanished_screen_is_detected() {
+        // External display unplugged across sleep: the panel's origin still points
+        // at coordinates no screen covers, so re-fronting it shows the user nothing.
+        let stranded = frame(-2560.0, 0.0, 2560.0, 1440.0);
+        let surviving = frame(0.0, 0.0, 1512.0, 982.0);
+        assert!(needs_replacing(stranded, surviving));
     }
 
     #[test]
-    fn a_window_that_wont_report_its_frame_is_re_placed_defensively() {
-        // outer_position/outer_size failing must never be read as "it's fine" — a
-        // redundant setFrame is far cheaper than an alarm stranded offscreen.
-        let target = frame(0, 0, 2560, 1440);
-        assert_eq!(
-            placement_for(target, None, Some(target)),
-            Placement::Replace { announce: false }
-        );
-    }
-
-    #[test]
-    fn a_panel_we_have_never_placed_announces_its_first_placement() {
-        // No remembered frame (fresh process, or a panel rebuilt after being lost).
-        let target = frame(0, 0, 2560, 1440);
-        assert_eq!(
-            placement_for(target, Some(target), None),
-            Placement::Replace { announce: true }
-        );
+    fn sub_point_noise_is_not_a_layout_change() {
+        // f64 frame arithmetic must not read as "the layout changed" — that would
+        // re-issue a frame change AND an INFO line on every single tick, which is
+        // the per-tick log spam src-tauri/CLAUDE.md forbids.
+        let target = frame(0.0, 0.0, 2560.0, 1440.0);
+        assert!(!needs_replacing(frame(0.2, -0.1, 2560.3, 1439.8), target));
+        // …but a visible fraction of a point still counts.
+        assert!(needs_replacing(frame(0.0, 0.0, 2559.0, 1440.0), target));
     }
 
     #[test]

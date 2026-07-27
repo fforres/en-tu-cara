@@ -73,6 +73,9 @@ pub fn stop_alert_loop() {
 mod tests {
     use super::*;
 
+    // NOTE: these tests own the process-global ALERTING flag. Cargo runs tests in
+    // parallel threads inside ONE process, so a second test touching ALERTING must
+    // serialize against this one (see the TEST_LOCK pattern in scheduler.rs).
     #[test]
     fn only_one_alert_loop_can_ever_be_claimed() {
         // The scheduler's overlay self-heal calls start_alert_loop on EVERY tick

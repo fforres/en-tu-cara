@@ -76,7 +76,13 @@ scripts/checkpoints/       regression gates: *-auto.sh + human runbooks
 
 - Permission revoked mid-run → tray banner + System Settings deep-link.
 - Chaos: 0 calendars; ~300 events; week-long sleep → no alert storm on wake;
-  monitor hot-plug between arming and fire re-targets overlay panels.
+  monitor hot-plug between arming and fire re-targets overlay panels. NOTE: a
+  display hot-plugged while an alarm is ALREADY on screen is a known, deliberate
+  gap — the per-tick self-heal re-frames existing panels onto the current screens
+  (and re-elects the key panel) but does not build one for a newly attached
+  display until the next fire. Creating a window in `show_overlays`' reuse path is
+  unverified on the alarm-critical path, and an ObjC abort there would kill every
+  future alarm. Covered displays stay visible and actionable throughout.
 - Resource re-check: idle < 120 MB; overlays on 2 displays < 250 MB.
 
 ### EventKit freshness
