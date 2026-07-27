@@ -69,17 +69,51 @@ pub fn is_presented(occurrence_key: &str) -> bool {
     lock_resilient(&PRESENTED).iter().any(|c| key_of(c) == Some(occurrence_key))
 }
 
+/// The side of the takeover this module drives: panels + sound + webview events.
+///
+/// A trait, not direct `overlay::`/`emit` calls, for ONE reason — testability. The
+/// rules below (never show for an empty card set, never add a card the panels
+/// didn't accept, never close while cards remain) are the entire safety story of
+/// the takeover, and every one of them is about WHICH surface calls happen in
+/// WHICH order. Against a real `AppHandle` those calls need a window server and a
+/// running app, so they could only ever be verified by hand; behind this seam a
+/// test asserts the exact call sequence. `Real` is the production implementation
+/// and holds no logic of its own.
+pub trait Surface {
+    /// Ensure panels are up, correctly placed, and the alert loop is running.
+    fn show(&self) -> Result<(), String>;
+    /// Close every panel and silence the alert.
+    fn close(&self);
+    /// Tell live overlay webviews about a change to the card set.
+    fn notify(&self, event: &str, payload: &serde_json::Value);
+}
+
+/// The production surface: Tauri panels + the native sound loop.
+pub struct Real<'a>(pub &'a AppHandle);
+
+impl Surface for Real<'_> {
+    fn show(&self) -> Result<(), String> {
+        crate::overlay::show_overlays(self.0).map(|_| ()).map_err(|e| e.to_string())
+    }
+    fn close(&self) {
+        crate::overlay::close_overlays(self.0);
+    }
+    fn notify(&self, event: &str, payload: &serde_json::Value) {
+        let _ = self.0.emit(event, payload);
+    }
+}
+
 /// Put a fired alarm on screen. MAIN THREAD ONLY.
 ///
 /// Panels first, card second, and that order is load-bearing: the scheduler marks
 /// an alarm fired only when this returns `Ok`, so on a failed show the alarm stays
 /// unmarked and the next tick retries it. Adding the card before knowing the panels
 /// are up would leave that retry to push a SECOND card for the same alarm.
-pub fn present(app: &AppHandle, card: serde_json::Value) -> Result<(), String> {
-    crate::overlay::show_overlays(app).map_err(|e| e.to_string())?;
+pub fn present_on(surface: &impl Surface, card: serde_json::Value) -> Result<(), String> {
+    surface.show()?;
     lock_resilient(&PRESENTED).push(card.clone());
     // Panels already booted get the push; freshly created ones pull on mount.
-    let _ = app.emit("alarm-fired", &card);
+    surface.notify("alarm-fired", &card);
     Ok(())
 }
 
@@ -89,38 +123,37 @@ pub fn present(app: &AppHandle, card: serde_json::Value) -> Result<(), String> {
 /// presented until the user actions it, but its panels can be torn down or
 /// stranded under it — most importantly across SYSTEM SLEEP, where display
 /// reconfiguration on wake leaves the panels on coordinates no screen covers while
-/// the sound loop keeps beating. `show_overlays` re-frames and re-fronts what
-/// survived and rebuilds what didn't; it is a cheap no-op when everything is
-/// already correct.
+/// the sound loop keeps beating. `show` re-frames and re-fronts what survived and
+/// rebuilds what didn't; it is a cheap no-op when everything is already correct.
 ///
-/// The `any_presented` check is the whole safety story, and it must happen HERE on
-/// the main thread rather than at the scheduler's dispatch site: a dismiss landing
-/// between the two would otherwise have us rebuild panels for an empty card set and
-/// restart the sound — resurrecting an alarm the user just dismissed.
-pub fn reassert(app: &AppHandle) {
+/// The emptiness check is the whole safety story, and it must happen HERE rather
+/// than only at the scheduler's dispatch site: a dismiss landing between the two
+/// would otherwise have us rebuild panels for an empty card set and restart the
+/// sound — resurrecting an alarm the user just dismissed.
+pub fn reassert_on(surface: &impl Surface) {
     if !any_presented() {
         return;
     }
-    if let Err(e) = crate::overlay::show_overlays(app) {
+    if let Err(e) = surface.show() {
         log::error!("overlay self-heal re-assert failed: {e}");
     }
 }
 
 /// Take ONE occurrence off screen (dismiss / snooze / ignore of a single card).
-pub fn finish(app: &AppHandle, occurrence_key: &str) {
+pub fn finish_on(surface: &impl Surface, occurrence_key: &str) {
     let remaining = {
         let mut cards = lock_resilient(&PRESENTED);
         *cards = without_occurrence(&cards, occurrence_key);
         cards.clone()
     };
-    settle(app, remaining);
+    settle(surface, remaining);
 }
 
 /// Take EVERYTHING off screen — Esc, and the zero-card safety Dismiss. The blunt
 /// "get it all off my screen" escape hatch.
-pub fn finish_all(app: &AppHandle) {
+pub fn finish_all_on(surface: &impl Surface) {
     lock_resilient(&PRESENTED).clear();
-    settle(app, Vec::new());
+    settle(surface, Vec::new());
 }
 
 /// Bring the panels in line with what is left: nothing → tear the takeover down;
@@ -128,17 +161,81 @@ pub fn finish_all(app: &AppHandle) {
 ///
 /// The one place panels are derived from cards on removal, so "cards gone, panels
 /// up" can't be built by accident.
-fn settle(app: &AppHandle, remaining: Vec<serde_json::Value>) {
+fn settle(surface: &impl Surface, remaining: Vec<serde_json::Value>) {
     if remaining.is_empty() {
-        crate::overlay::close_overlays(app);
+        surface.close();
     } else {
-        let _ = app.emit("alarms-updated", remaining);
+        surface.notify("alarms-updated", &serde_json::Value::Array(remaining));
     }
 }
+
+// --- The AppHandle-facing API the rest of the crate calls. ---
+
+pub fn present(app: &AppHandle, card: serde_json::Value) -> Result<(), String> {
+    present_on(&Real(app), card)
+}
+
+pub fn reassert(app: &AppHandle) {
+    reassert_on(&Real(app));
+}
+
+pub fn finish(app: &AppHandle, occurrence_key: &str) {
+    finish_on(&Real(app), occurrence_key);
+}
+
+pub fn finish_all(app: &AppHandle) {
+    finish_all_on(&Real(app));
+}
+
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in for the real panels that RECORDS what was asked of it.
+    ///
+    /// Every rule this module enforces is about which surface calls happen, and in
+    /// which order — so the call log IS the assertion. Against a real `AppHandle`
+    /// none of this is reachable without a window server, which is exactly why the
+    /// takeover's safety rules went untested until this seam existed.
+    struct Fake {
+        calls: Mutex<Vec<String>>,
+        show_fails: bool,
+    }
+
+    impl Fake {
+        fn working() -> Self {
+            Self { calls: Mutex::new(Vec::new()), show_fails: false }
+        }
+        /// A surface that cannot bring panels up (no window server, ObjC failure).
+        fn broken() -> Self {
+            Self { calls: Mutex::new(Vec::new()), show_fails: true }
+        }
+        fn calls(&self) -> Vec<String> {
+            lock_resilient(&self.calls).clone()
+        }
+        /// Drop the log so a later assertion sees only the calls it cares about.
+        fn forget(&self) {
+            lock_resilient(&self.calls).clear();
+        }
+    }
+
+    impl Surface for Fake {
+        fn show(&self) -> Result<(), String> {
+            lock_resilient(&self.calls).push("show".into());
+            if self.show_fails {
+                return Err("no window server".into());
+            }
+            Ok(())
+        }
+        fn close(&self) {
+            lock_resilient(&self.calls).push("close".into());
+        }
+        fn notify(&self, event: &str, payload: &serde_json::Value) {
+            let n = payload.as_array().map_or(1, |a| a.len());
+            lock_resilient(&self.calls).push(format!("notify:{event}:{n}"));
+        }
+    }
 
     /// These tests own the PRESENTED global (cargo runs tests in parallel threads
     /// inside ONE process). Bind the guard — `let _x = exclusive()`, never
@@ -157,84 +254,205 @@ mod tests {
         serde_json::json!({"occurrence_key": key, "kind": kind, "title": "Standup"})
     }
 
-    #[test]
-    fn nothing_presented_means_no_reassert() {
-        // An empty set must stay a no-op: an overlay may never pop out of nowhere
-        // on a machine with no alarm on screen.
-        let _x = exclusive();
-        assert!(!any_presented());
-    }
+    // ---------------------------------------------------------------------
+    // The resurrection bug: an overlay must NEVER come back after a dismiss.
+    // ---------------------------------------------------------------------
 
     #[test]
-    fn a_dismiss_racing_the_reassert_leaves_the_overlay_down() {
-        // THE regression that produced this module. The scheduler decides to
-        // re-assert on its own thread and queues the work onto the main thread; a
-        // dismiss can land in the gap, clearing the cards and closing the panels.
-        // `reassert` re-reads here, so it becomes a no-op — without that, it would
-        // rebuild panels for zero cards and restart the sound loop, i.e. resurrect
-        // an alarm the user just dismissed.
+    fn a_dismiss_racing_the_reassert_never_reopens_the_takeover() {
+        // The exact interleaving that shipped broken: the scheduler sees a card on
+        // its own thread and queues a re-assert onto the main thread; the user
+        // dismisses in the gap. If the queued re-assert still calls show(), the
+        // user gets rebuilt panels with ZERO cards and the sound loop restarts —
+        // an alarm they just dismissed, and (before the card set was the source of
+        // truth) no way to dismiss it again.
         let _x = exclusive();
         lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
-        assert!(any_presented(), "scheduler sees a card and dispatches a re-assert");
+        assert!(any_presented(), "precondition: the scheduler had a reason to dispatch");
 
-        lock_resilient(&PRESENTED).clear(); // …user hits Dismiss first.
+        let surface = Fake::working();
+        finish_all_on(&surface); // …the dismiss lands first.
+        surface.forget(); // ignore the dismiss's own close()
 
-        assert!(!any_presented(), "a just-dismissed overlay must NOT be resurrected");
+        reassert_on(&surface); // the in-flight re-assert finally runs
+
+        assert!(
+            surface.calls().is_empty(),
+            "the re-assert must not touch the panels at all; got {:?}",
+            surface.calls()
+        );
     }
 
     #[test]
-    fn a_reassert_still_fires_when_the_alarm_outlives_the_dispatch() {
-        // The other half: nothing changed in the gap, so the re-assert must still
-        // act — otherwise the self-heal never heals anything.
+    fn a_dismissed_takeover_stays_down_across_many_later_ticks() {
+        // Not just the racing tick — EVERY subsequent one. The self-heal runs on a
+        // ≤30s cadence forever, so a single missing guard means the alarm returns
+        // again and again until the app is force-quit (the original report).
         let _x = exclusive();
         lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
-        assert!(any_presented());
+        let surface = Fake::working();
+        finish_on(&surface, "(A @ t)");
+        surface.forget();
+
+        for _ in 0..5 {
+            reassert_on(&surface);
+        }
+        assert!(
+            surface.calls().is_empty(),
+            "a dismissed alarm must stay dismissed; got {:?}",
+            surface.calls()
+        );
     }
 
     #[test]
-    fn finishing_one_occurrence_drops_all_its_cards_and_keeps_the_others() {
-        // Two overlapping meetings, A with both a reminder and a T-0 card.
-        // Actioning A must drop BOTH of A's cards and leave B alone — the old
-        // behavior cleared everything on any action.
-        let cards = vec![
+    fn a_reassert_rebuilds_the_takeover_while_a_card_is_still_up() {
+        // The other direction, and the reason the feature exists: an undismissed
+        // alarm whose panels were lost across sleep MUST get them back. A guard so
+        // eager that it never heals would pass the tests above and still leave the
+        // user with an audible, invisible alarm.
+        let _x = exclusive();
+        lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
+
+        let surface = Fake::working();
+        reassert_on(&surface);
+
+        assert_eq!(surface.calls(), ["show"], "the panels must be re-asserted");
+    }
+
+    #[test]
+    fn a_reassert_survives_a_surface_that_cannot_show() {
+        // A failing show must not panic the scheduler tick (it runs inside
+        // catch_unwind, but a panic there costs a tick) and must leave the card in
+        // place so the NEXT tick tries again.
+        let _x = exclusive();
+        lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
+
+        let surface = Fake::broken();
+        reassert_on(&surface);
+
+        assert_eq!(surface.calls(), ["show"]);
+        assert!(any_presented(), "the card stays so the next tick retries");
+    }
+
+    // ---------------------------------------------------------------------
+    // Firing: a card may exist only once its panels are confirmed up.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn a_failed_show_records_no_card_so_the_retry_cannot_duplicate_it() {
+        // The scheduler marks an alarm fired only when present() returns Ok, so a
+        // failed show leaves it unmarked and compute_actions re-fires it next tick.
+        // If the card had been recorded anyway, that retry would add a SECOND card
+        // for one alarm — two identical cards stacked on the takeover.
+        let _x = exclusive();
+        let surface = Fake::broken();
+
+        assert!(present_on(&surface, card("(A @ t)", "t_zero")).is_err());
+
+        assert!(get_active_alarms().is_empty(), "no card for an alert that never appeared");
+        assert_eq!(
+            surface.calls(),
+            ["show"],
+            "and no alarm-fired event either — the webview must not hear about it"
+        );
+    }
+
+    #[test]
+    fn present_brings_the_panels_up_before_it_records_the_card() {
+        // Order is the invariant, so the call log is the assertion.
+        let _x = exclusive();
+        let surface = Fake::working();
+
+        present_on(&surface, card("(A @ t)", "t_zero")).expect("show works");
+
+        assert_eq!(surface.calls(), ["show", "notify:alarm-fired:1"]);
+        assert_eq!(get_active_alarms().len(), 1, "the card is recorded for a rebuilt panel to pull");
+    }
+
+    // ---------------------------------------------------------------------
+    // Finishing: panels come down exactly when the last card does.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn finishing_one_of_two_keeps_the_takeover_up_and_broadcasts_the_rest() {
+        // Two overlapping meetings. Actioning one must NOT close the overlay — the
+        // old code cleared everything on any action, taking the other meeting's
+        // alert down with it.
+        let _x = exclusive();
+        *lock_resilient(&PRESENTED) = vec![card("(A @ t)", "t_zero"), card("(B @ t)", "t_zero")];
+
+        let surface = Fake::working();
+        finish_on(&surface, "(A @ t)");
+
+        assert_eq!(
+            surface.calls(),
+            ["notify:alarms-updated:1"],
+            "re-render with B only, and NO close"
+        );
+        assert!(is_presented("(B @ t)"), "B is still on screen");
+        assert!(!is_presented("(A @ t)"));
+    }
+
+    #[test]
+    fn finishing_a_meetings_last_card_drops_its_other_cards_too() {
+        // A meeting can have a reminder AND a T-0 card up. Actioning it must clear
+        // both, or the takeover stays up showing a stale card for a handled meeting.
+        let _x = exclusive();
+        *lock_resilient(&PRESENTED) = vec![
             card("(A @ t)", "reminder_5"),
             card("(A @ t)", "t_zero"),
             card("(B @ t)", "t_zero"),
         ];
-        let remaining = without_occurrence(&cards, "(A @ t)");
-        assert_eq!(remaining.len(), 1, "only B survives");
-        assert_eq!(key_of(&remaining[0]), Some("(B @ t)"));
+
+        let surface = Fake::working();
+        finish_on(&surface, "(A @ t)");
+
+        assert_eq!(surface.calls(), ["notify:alarms-updated:1"]);
+        assert!(!is_presented("(A @ t)"), "BOTH of A's cards are gone");
     }
 
     #[test]
-    fn the_takeover_comes_down_only_once_the_last_card_is_gone() {
-        // `settle` tears the panels down exactly when the set empties, so an
-        // overlapping meeting can never be silently taken down with the one the
-        // user actioned — and the self-heal keeps asserting until then.
+    fn finishing_the_last_card_takes_the_takeover_down_and_silences_it() {
+        let _x = exclusive();
+        lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
+
+        let surface = Fake::working();
+        finish_on(&surface, "(A @ t)");
+
+        assert_eq!(surface.calls(), ["close"], "panels closed and the alert silenced");
+        assert!(get_active_alarms().is_empty());
+    }
+
+    #[test]
+    fn finish_all_clears_every_card_and_closes_once() {
+        // Esc / the zero-card safety Dismiss. One close, not one per card.
         let _x = exclusive();
         *lock_resilient(&PRESENTED) = vec![card("(A @ t)", "t_zero"), card("(B @ t)", "t_zero")];
 
-        let remaining = without_occurrence(&lock_resilient(&PRESENTED), "(A @ t)");
-        *lock_resilient(&PRESENTED) = remaining;
-        assert!(any_presented(), "B is still up — the overlay stays, and stays asserted");
+        let surface = Fake::working();
+        finish_all_on(&surface);
 
-        let remaining = without_occurrence(&lock_resilient(&PRESENTED), "(B @ t)");
-        *lock_resilient(&PRESENTED) = remaining;
-        assert!(!any_presented(), "last card actioned → the takeover comes down for good");
+        assert_eq!(surface.calls(), ["close"]);
+        assert!(get_active_alarms().is_empty());
     }
 
     #[test]
-    fn is_presented_detects_a_live_card_by_occurrence() {
-        // The ignore path branches on this: true → also take the live card down;
-        // false → leave the overlay completely alone. ANY card for the key counts,
-        // whatever its kind.
+    fn finishing_an_occurrence_that_is_not_on_screen_leaves_the_takeover_alone() {
+        // The ignore path can fire for a meeting that isn't presented. That must not
+        // close a takeover showing something else.
         let _x = exclusive();
-        *lock_resilient(&PRESENTED) =
-            vec![card("(A @ t)", "reminder_5"), card("(B @ t)", "t_zero")];
+        lock_resilient(&PRESENTED).push(card("(A @ t)", "t_zero"));
+
+        let surface = Fake::working();
+        finish_on(&surface, "(C @ t)");
+
+        assert_eq!(surface.calls(), ["notify:alarms-updated:1"], "A is untouched, nothing closed");
         assert!(is_presented("(A @ t)"));
-        assert!(is_presented("(B @ t)"));
-        assert!(!is_presented("(C @ t)"), "absent key is not presented");
     }
+
+    // ---------------------------------------------------------------------
+    // Reads the rest of the app depends on.
+    // ---------------------------------------------------------------------
 
     #[test]
     fn a_rebuilt_panel_finds_every_card_still_there() {
