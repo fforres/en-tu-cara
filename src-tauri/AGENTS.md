@@ -4,8 +4,12 @@ Accessory (dock-less) menu-bar agent. Modules in `src/`:
 
 - `alarm_core.rs` — PURE decision engine `compute_actions(events, now, state, cfg)`.
   All policy lives here; it must stay clock-free and side-effect-free.
-- `scheduler.rs` — tick loop (≤30s, wall-clock armed), fire→overlay+sound,
-  snooze/dismiss/pause commands, test-event injection.
+- `scheduler.rs` — tick loop (≤30s, wall-clock armed), fire→present, alarm-policy
+  commands (snooze/dismiss/ignore/pause), test-event injection.
+- `presentation.rs` — THE owner of "what is on screen": the presented card set,
+  with the panel + sound lifecycle DERIVED from it. All overlay state changes go
+  through `present` / `reassert` / `finish` / `finish_all`; nothing else may open
+  or close panels or touch the card set. See "Takeover presentation" below.
 - `calendar.rs` — EventKit via `eventkit-rs`; multi-calendar dedup;
   `sync_event_store()` (refresh remote + reset local cache) per poll.
 - `overlay.rs` / `tray.rs` — nspanel windows (takeover / popover / settings opener).
@@ -93,6 +97,20 @@ EventKit failures; `recover_after` flips it healthy after N secs).
    to the calendar daemon dies (after sleep, or a TCC reset) keeps returning
    stale "no data" forever otherwise. Bumped on wake (scheduler drift detection)
    and on every Lost read (self-heal).
+10. **`window.set_position` / `set_size` cannot move a window between displays of
+    different scale factors.** tao converts with the SOURCE window's scale
+    (`position.to_logical(self.scale_factor())`), so a target computed from
+    another display lands at half/double coordinates — and since the window then
+    never reaches the target, any "is it placed correctly?" loop re-issues the
+    move forever. Both windows that move across screens drive the native
+    `NSWindow` frame instead, in AppKit points, one coordinate space, no
+    physical/logical mixing: `tray::position_under_tray` (popover) and
+    `overlay::resync_overlay_geometry` (takeover panels after a display change).
+    Extract a shared helper if a third caller appears. Related: tauri#5229,
+    tauri#7139. Bonus reason to avoid the tauri path here — `available_monitors()`
+    costs 0.2–1 ms of main-thread AppKit work (it makes O(displays²)
+    `CGDisplayCreateUUIDFromDisplayID` round-trips); `NSScreen::screens` is ~1000×
+    cheaper and matters on a per-tick path.
 
 ## Calendar access health (never fail silently)
 
@@ -128,9 +146,40 @@ returns `Err` when access is unavailable):
   observed because EventKit caches auth in-process). The pure machine is
   exhaustively unit-tested (classify, debounce, flap, silent-self-heal, recovery).
 
+## Takeover presentation (panels are a function of the card set)
+
+`presentation.rs` owns "what is on screen". ONE rule: the panels and the alert
+sound are DERIVED from the presented card set, and only that module may change
+either side. Every takeover bug in this project's history was a state where the
+two disagreed:
+
+- **cards present, panels gone** → an audible alarm with nothing to dismiss; the
+  user's only escape was force-quitting (reported). Cured by `reassert`, run from
+  every scheduler tick: it re-frames/re-fronts surviving panels and rebuilds lost
+  ones. A rebuilt panel repopulates by pulling `get_active_alarms` on mount, which
+  is why the cards must outlive the panels.
+- **panels present, cards gone** → a blank takeover with the sound looping, which
+  `reassert` then faithfully resurrects every tick. This is why `reassert` re-reads
+  the card set on the MAIN THREAD (the scheduler's own check is just an
+  optimization to skip the hop), and why `close_overlays` is no longer an IPC
+  command — being callable from the webview put that state one `invoke` away.
+
+The serialization that makes this safe: every mutation runs on the main thread —
+the fire path dispatches via `run_on_main_thread`, and the commands that reach
+here are all SYNC `#[tauri::command]`s, which Tauri dispatches inline on the main
+thread. Marking one of them `async` moves it to the async runtime and reopens the
+resurrection race; if you ever need that, the panel lifecycle needs a real lock,
+not a re-read.
+
+Panel geometry is driven through the native `NSWindow` frame from `NSScreen`
+frames, NOT `window.set_position`/`set_size` — see gotcha #10.
+
 ## Do NOT
 
 - Touch alarm policy outside `alarm_core.rs`, or give it access to a clock.
+- Open/close overlay panels, start/stop the alert sound, or mutate the presented
+  card set anywhere but `presentation.rs`. That module's whole purpose is that
+  "cards on screen" and "panels on screen" can never disagree.
 - Initialize plugins/windows before the existing setup order in `lib.rs`.
 - Remove the dual write in `testmode::log_fire` / overlay heartbeat — every
   checkpoint script depends on those files.

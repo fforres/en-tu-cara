@@ -47,23 +47,9 @@ use crate::alarm_core::{compute_actions, next_due, AlarmEvent};
 use crate::state::SharedState;
 use serde::Deserialize;
 use std::sync::Mutex;
-use tauri::Emitter;
 
 /// Events injected via test-mode IPC override EventKit.
 pub static INJECTED_EVENTS: Mutex<Option<Vec<AlarmEvent>>> = Mutex::new(None);
-
-/// Alarms currently presented in the overlay. The overlay webview boots AFTER
-/// the fire emit, so it pulls these on mount (and also listens for later emits).
-///
-/// INVARIANT — every MUTATION happens on the MAIN THREAD: the fire path pushes
-/// inside `run_on_main_thread`, and `dismiss_alarms` / `snooze_alarm` /
-/// `ignore_occurrence` / `demo_alert` are all SYNC `#[tauri::command]`s, which
-/// Tauri dispatches inline on the main thread. That is what makes the overlay
-/// self-heal's re-check atomic against a dismiss (see `tick`). Marking any of
-/// those commands `async` would move it to the async runtime and silently reopen
-/// the "re-assert resurrects a just-dismissed alarm" race — if you do, the panel
-/// lifecycle needs a real lock, not a re-read.
-pub static ACTIVE_ALARMS: Mutex<Vec<serde_json::Value>> = Mutex::new(Vec::new());
 
 /// Last-seen "did the calendar pipeline yield ANY events" state, for the
 /// transition log below. None = no tick has run yet.
@@ -100,27 +86,6 @@ fn presence_transition(prev: Option<bool>, count: usize) -> Option<String> {
 /// each new global — overlay.rs locks MAIN_OVERLAY through this too.
 pub(crate) fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Is a fired alarm still on screen? Drives the sleep/wake overlay self-heal — a
-/// fired alarm the user hasn't dismissed can lose its panels across system sleep
-/// while the sound loop keeps beating, so `tick` re-fronts (or recreates) them
-/// every pass; an empty set must stay a no-op so an overlay never pops out of
-/// nowhere.
-///
-/// `tick` calls this TWICE per pass and both reads are load-bearing — see the
-/// comment at the call site.
-fn an_alarm_is_presented() -> bool {
-    !lock_resilient(&ACTIVE_ALARMS).is_empty()
-}
-
-/// The presented card set, pulled by an overlay webview on mount. This is what
-/// makes the scheduler's self-heal able to REBUILD a lost overlay rather than only
-/// re-front a live one: a freshly created panel repopulates from here, so the cards
-/// must outlive the panels (only dismiss/snooze/ignore may clear them).
-#[tauri::command]
-pub fn get_active_alarms() -> Vec<serde_json::Value> {
-    lock_resilient(&ACTIVE_ALARMS).clone()
 }
 
 /// Current calendar-access health, for the Settings banner to read on mount (it
@@ -415,40 +380,15 @@ pub(crate) fn build_alarm_config(settings: &crate::settings::Settings) -> crate:
 fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
 
-    // Self-heal overlay visibility. A fired alarm stays "presented" in
-    // ACTIVE_ALARMS until the user dismisses it, but the takeover nspanels can be
-    // torn down out from under us — most importantly across SYSTEM SLEEP: on wake
-    // the display reconfiguration drops the panels while the (idempotent) sound
-    // loop keeps beating, leaving the user with an audible alarm and no way to
-    // stop it but force-quitting the app (reported). Re-assert on every tick so an
-    // active alarm ALWAYS has a visible, dismissable overlay: show_overlays snaps
-    // surviving panels back onto the CURRENT display layout, re-fronts them, and
-    // recreates lost ones (a freshly built overlay re-pulls ACTIVE_ALARMS on
-    // mount), and is a cheap no-op when the panels are already up and correctly
-    // placed. This rides the scheduler's existing tick-driven self-heal (first tick
-    // post-wake) rather than a fragile NSWorkspace observer — same reasoning as
-    // `looks_like_wake` below.
-    //
-    // The guard is checked TWICE on purpose. This read runs on the SCHEDULER
-    // thread and only saves the main-thread hop; the one INSIDE the closure is the
-    // load-bearing one, because a dismiss/snooze can land in between — clearing
-    // ACTIVE_ALARMS and closing the panels. Without the re-read, the queued
-    // closure would find no live panels, BUILD FRESH ONES with an empty card set,
-    // and restart the sound loop: an audible alarm the user just dismissed, i.e.
-    // exactly the failure this self-heal exists to prevent. The re-read is atomic
-    // against that dismiss because every ACTIVE_ALARMS mutation is main-thread —
-    // see the invariant on the static. (The reverse order was always safe: we
-    // re-front, then the dismiss closes and silences.)
-    if an_alarm_is_presented() {
+    // Sleep/wake overlay self-heal: an alarm on screen must ALWAYS have a visible,
+    // dismissable takeover, so re-assert it every pass (see
+    // `presentation::reassert` — it owns the "is anything still presented" decision
+    // and why that check has to happen on the main thread). This read is only an
+    // optimization to skip the main-thread hop. Riding the tick rather than an
+    // NSWorkspace observer is the same call as `looks_like_wake` below.
+    if crate::presentation::any_presented() {
         let handle = app.clone();
-        let _ = app.run_on_main_thread(move || {
-            if !an_alarm_is_presented() {
-                return; // dismissed/snoozed between dispatch and here — stay down.
-            }
-            if let Err(e) = crate::overlay::show_overlays(&handle) {
-                log::error!("overlay self-heal re-assert failed: {e}");
-            }
-        });
+        let _ = app.run_on_main_thread(move || crate::presentation::reassert(&handle));
     }
 
     let settings = app.state::<crate::settings::SettingsStore>().get();
@@ -501,7 +441,7 @@ fn tick(app: &tauri::AppHandle) -> u64 {
             "end": event.map(|e| e.end.to_rfc3339()),
         });
 
-        // Show the overlay on the main thread and WAIT for the outcome. We mark
+        // Put it on screen from the main thread and WAIT for the outcome. We mark
         // the alarm fired ONLY once the overlay is confirmed up — otherwise a
         // failed show would advance the fired-set and the alert would be
         // swallowed forever with no retry (the unforgivable failure). Waiting
@@ -510,16 +450,9 @@ fn tick(app: &tauri::AppHandle) -> u64 {
         // leave the alarm unmarked and the next tick retries it.
         let (tx, rx) = std::sync::mpsc::channel();
         let handle = app.clone();
-        let shown_payload = payload.clone();
+        let card = payload.clone();
         let _ = app.run_on_main_thread(move || {
-            let result = crate::overlay::show_overlays(&handle);
-            if result.is_ok() {
-                // Already-booted overlay windows get the push; freshly created
-                // ones pull via get_active_alarms on mount.
-                lock_resilient(&ACTIVE_ALARMS).push(shown_payload.clone());
-                let _ = handle.emit("alarm-fired", &shown_payload);
-            }
-            let _ = tx.send(result.map(|_| ()).map_err(|e| e.to_string()));
+            let _ = tx.send(crate::presentation::present(&handle, card));
         });
         let occurrence_hash = crate::telemetry::sha256_hex(action.occurrence_key.as_bytes());
         match rx.recv_timeout(Duration::from_secs(5)) {
@@ -687,55 +620,12 @@ pub fn demo_alert(app: tauri::AppHandle) {
         "start": (now + ChronoDuration::minutes(45)).to_rfc3339(),
         "end": (now + ChronoDuration::minutes(90)).to_rfc3339(),
     });
-    lock_resilient(&ACTIVE_ALARMS).push(payload.clone());
     let handle = app.clone();
     let _ = app.run_on_main_thread(move || {
-        match crate::overlay::show_overlays(&handle) {
-            Ok(_) => {
-                let _ = handle.emit("alarm-fired", &payload);
-            }
-            Err(e) => eprintln!("demo overlay failed: {e}"),
+        if let Err(e) = crate::presentation::present(&handle, payload) {
+            log::error!("demo overlay failed: {e}");
         }
     });
-}
-
-/// The active-alarm payloads NOT belonging to `occurrence_key`. Pure over the
-/// payload vec so the per-occurrence isolation is unit-testable.
-fn retain_other_occurrences(
-    active: &[serde_json::Value],
-    occurrence_key: &str,
-) -> Vec<serde_json::Value> {
-    active
-        .iter()
-        .filter(|p| p.get("occurrence_key").and_then(|v| v.as_str()) != Some(occurrence_key))
-        .cloned()
-        .collect()
-}
-
-/// Is `occurrence_key` currently presented in the overlay? Pure over the payload
-/// vec so the "drop the live card on ignore" guard is unit-testable.
-fn is_occurrence_active(active: &[serde_json::Value], occurrence_key: &str) -> bool {
-    active
-        .iter()
-        .any(|p| p.get("occurrence_key").and_then(|v| v.as_str()) == Some(occurrence_key))
-}
-
-/// Finish ONE occurrence: drop its card(s) from the active set, then close the
-/// overlay only if nothing remains — otherwise tell the still-open overlay to
-/// re-render the reduced set. This is what lets two overlapping meetings be
-/// actioned independently: dismissing/snoozing one must never silently take the
-/// other down with it (the old code cleared ALL active alarms on any action).
-fn finish_one(app: &tauri::AppHandle, occurrence_key: &str) {
-    let remaining = {
-        let mut active = lock_resilient(&ACTIVE_ALARMS);
-        *active = retain_other_occurrences(&active, occurrence_key);
-        active.clone()
-    };
-    if remaining.is_empty() {
-        crate::overlay::close_overlays(app.clone());
-    } else {
-        let _ = app.emit("alarms-updated", remaining);
-    }
 }
 
 #[tauri::command]
@@ -750,7 +640,7 @@ pub fn snooze_alarm(app: tauri::AppHandle, occurrence_key: String, minutes: i64)
             "minutes": minutes,
         }),
     );
-    finish_one(&app, &occurrence_key);
+    crate::presentation::finish(&app, &occurrence_key);
 }
 
 /// Dismiss ONE occurrence (when `occurrence_key` is supplied by a card button) or
@@ -767,12 +657,11 @@ pub fn dismiss_alarms(app: tauri::AppHandle, occurrence_key: Option<String>) {
                     "scope": "one",
                 }),
             );
-            finish_one(&app, &key);
+            crate::presentation::finish(&app, &key);
         }
         None => {
             crate::telemetry::record("alarm_dismissed", serde_json::json!({ "scope": "all" }));
-            lock_resilient(&ACTIVE_ALARMS).clear();
-            crate::overlay::close_overlays(app);
+            crate::presentation::finish_all(&app);
         }
     }
 }
@@ -810,8 +699,8 @@ pub fn ignore_occurrence(app: tauri::AppHandle, occurrence_key: String, ends_at:
     // otherwise the card stays up and the alert loops despite being ignored.
     // Guard on "is it actually active" so we never needlessly close_overlays /
     // stop the loop when nothing for this key is showing.
-    if is_occurrence_active(&lock_resilient(&ACTIVE_ALARMS), &occurrence_key) {
-        finish_one(&app, &occurrence_key);
+    if crate::presentation::is_presented(&occurrence_key) {
+        crate::presentation::finish(&app, &occurrence_key);
     }
 }
 
@@ -861,97 +750,6 @@ mod tests {
         assert!(looks_like_wake(1, 600));
     }
 
-    /// The overlay self-heal (`tick`'s sleep/wake re-assert) is the one place that
-    /// reads AND is raced against the ACTIVE_ALARMS global, so its tests must own
-    /// that static exclusively. Cargo runs tests in parallel threads inside ONE
-    /// process — without this they'd leak phantom cards into each other. Clears on
-    /// acquire AND on drop so neither an ordering nor a panicking test can strand a
-    /// card in the global.
-    mod overlay_self_heal {
-        use super::*;
-
-        static TEST_LOCK: Mutex<()> = Mutex::new(());
-
-        /// Take exclusive ownership of ACTIVE_ALARMS for one test and hand back a
-        /// clean slate. Bind it (`let _x = exclusive()`, never `let _ =`) so the
-        /// guard lives for the whole test. Clearing on ACQUIRE rather than on drop
-        /// is deliberate: it needs no `Drop` impl, and it still can't leak a card
-        /// into the next test even if this one panics (a panic poisons TEST_LOCK,
-        /// and `lock_resilient` recovers the guard and clears).
-        fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-            let guard = lock_resilient(&TEST_LOCK);
-            lock_resilient(&ACTIVE_ALARMS).clear();
-            guard
-        }
-
-        fn card(key: &str) -> serde_json::Value {
-            serde_json::json!({"occurrence_key": key, "kind": "t_zero", "title": "Standup"})
-        }
-
-        #[test]
-        fn nothing_presented_means_no_reassert() {
-            // An empty set must stay a no-op in BOTH guard positions — an overlay
-            // must never pop out of nowhere on a machine with no alarm on screen.
-            let _x = exclusive();
-            assert!(!an_alarm_is_presented(), "nothing presented → no re-assert");
-        }
-
-        #[test]
-        fn a_dismiss_between_dispatch_and_the_main_thread_cancels_the_reassert() {
-            // THE regression this guards: the dispatch decision happens on the
-            // scheduler thread, the show runs later on the main thread. A dismiss
-            // landing in that window clears ACTIVE_ALARMS and closes the panels —
-            // if the queued closure still ran, show_overlays would find no live
-            // panels, BUILD FRESH ONES with zero cards, and restart the sound loop.
-            // That is an audible alarm the user just dismissed: the exact failure
-            // this self-heal exists to prevent.
-            let _x = exclusive();
-            lock_resilient(&ACTIVE_ALARMS).push(card("(A @ t)"));
-            assert!(an_alarm_is_presented(), "scheduler thread dispatches a re-assert");
-
-            // …user hits Dismiss before the main thread drains the queue.
-            lock_resilient(&ACTIVE_ALARMS).clear();
-
-            assert!(
-                !an_alarm_is_presented(),
-                "a just-dismissed overlay must NOT be resurrected by an in-flight re-assert"
-            );
-        }
-
-        #[test]
-        fn a_reassert_still_fires_when_the_alarm_outlives_the_dispatch() {
-            // The other half: nothing changed in the gap, so the queued closure
-            // must still act — otherwise the self-heal never heals anything.
-            let _x = exclusive();
-            lock_resilient(&ACTIVE_ALARMS).push(card("(A @ t)"));
-            assert!(an_alarm_is_presented(), "alarm still presented → go ahead and re-assert");
-        }
-
-        #[test]
-        fn the_reassert_stops_only_once_the_last_card_is_gone() {
-            // Snooze/dismiss/ignore all route through finish_one's removal, so the
-            // self-heal must keep asserting while ANY card remains (two overlapping
-            // meetings: actioning one must not abandon the other's overlay) and stop
-            // the moment the set empties.
-            let _x = exclusive();
-            *lock_resilient(&ACTIVE_ALARMS) = vec![card("(A @ t)"), card("(B @ t)")];
-
-            let remaining = retain_other_occurrences(&lock_resilient(&ACTIVE_ALARMS), "(A @ t)");
-            *lock_resilient(&ACTIVE_ALARMS) = remaining;
-            assert!(
-                an_alarm_is_presented(),
-                "B is still on screen — the overlay must keep being re-asserted"
-            );
-
-            let remaining = retain_other_occurrences(&lock_resilient(&ACTIVE_ALARMS), "(B @ t)");
-            *lock_resilient(&ACTIVE_ALARMS) = remaining;
-            assert!(
-                !an_alarm_is_presented(),
-                "last card actioned → overlay closes and stays closed"
-            );
-        }
-    }
-
     #[test]
     fn lock_resilient_recovers_from_poison() {
         let m: Mutex<i32> = Mutex::new(7);
@@ -982,44 +780,6 @@ mod tests {
             }
         }
         assert_eq!(completed, 3, "every non-panicking tick ran despite the panic at i==1");
-    }
-
-    #[test]
-    fn dismissing_one_occurrence_keeps_the_other() {
-        // Two overlapping meetings on screen, meeting A with both a reminder and a
-        // T-0 card. Dismissing A must drop BOTH A cards and leave B untouched.
-        let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
-            serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
-        ];
-        let remaining = retain_other_occurrences(&active, "(A @ t)");
-        assert_eq!(remaining.len(), 1, "only B should remain after dismissing A");
-        assert_eq!(remaining[0]["occurrence_key"], "(B @ t)");
-    }
-
-    #[test]
-    fn is_occurrence_active_detects_a_live_card() {
-        // The ignore path uses this to decide whether to also drop the live card:
-        // true → finish_one (close/re-render + stop sound); false → leave overlay
-        // untouched. A key with ANY card on screen (even a different kind) is active.
-        let active = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "reminder_5"}),
-            serde_json::json!({"occurrence_key": "(B @ t)", "kind": "t_zero"}),
-        ];
-        assert!(is_occurrence_active(&active, "(A @ t)"));
-        assert!(is_occurrence_active(&active, "(B @ t)"));
-        assert!(!is_occurrence_active(&active, "(C @ t)"), "absent key is not active");
-        assert!(!is_occurrence_active(&[], "(A @ t)"), "empty set: nothing is active");
-    }
-
-    #[test]
-    fn dismissing_the_only_occurrence_empties_the_set() {
-        let active = vec![serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"})];
-        assert!(
-            retain_other_occurrences(&active, "(A @ t)").is_empty(),
-            "removing the last occurrence empties the set so the overlay closes"
-        );
     }
 
     #[test]

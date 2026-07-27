@@ -14,6 +14,8 @@ mod grant_repair;
 #[cfg(target_os = "macos")]
 mod overlay;
 #[cfg(target_os = "macos")]
+mod presentation;
+#[cfg(target_os = "macos")]
 mod scheduler;
 #[cfg(target_os = "macos")]
 mod snapshot;
@@ -128,9 +130,8 @@ pub fn run() {
             calendar::list_calendars,
             calendar::fetch_events,
             overlay::spike_show_overlays,
-            overlay::close_overlays,
             scheduler::inject_events,
-            scheduler::get_active_alarms,
+            presentation::get_active_alarms,
             scheduler::get_access_state,
             scheduler::demo_alert,
             scheduler::snooze_alarm,
