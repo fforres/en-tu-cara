@@ -90,6 +90,16 @@ fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
+/// Whether `tick()` should re-assert the takeover overlay this pass: true exactly
+/// when an alarm is still presented. Drives the sleep/wake self-heal — a fired
+/// alarm the user hasn't dismissed can lose its panels across system sleep while
+/// the sound loop keeps beating, so we re-front (or recreate) them every tick; an
+/// empty set must stay a no-op so an overlay never pops out of nowhere. Pure, for
+/// testing.
+fn should_reassert_overlay(active_alarms: &[serde_json::Value]) -> bool {
+    !active_alarms.is_empty()
+}
+
 #[tauri::command]
 pub fn get_active_alarms() -> Vec<serde_json::Value> {
     lock_resilient(&ACTIVE_ALARMS).clone()
@@ -386,6 +396,29 @@ pub(crate) fn build_alarm_config(settings: &crate::settings::Settings) -> crate:
 /// One scheduler pass: fetch → decide → fire. Returns seconds until next wake.
 fn tick(app: &tauri::AppHandle) -> u64 {
     let now = crate::testmode::clock::now();
+
+    // Self-heal overlay visibility. A fired alarm stays "presented" in
+    // ACTIVE_ALARMS until the user dismisses it, but the takeover nspanels can be
+    // torn down out from under us — most importantly across SYSTEM SLEEP: on wake
+    // the display reconfiguration drops the panels while the (idempotent) sound
+    // loop keeps beating, leaving the user with an audible alarm and no way to
+    // stop it but force-quitting the app (reported). Re-assert on every tick so an
+    // active alarm ALWAYS has a visible, dismissable overlay: show_overlays
+    // re-fronts live panels and recreates lost ones (a freshly built overlay
+    // re-pulls ACTIVE_ALARMS on mount), and is a cheap no-op when the panels are
+    // already up. This rides the scheduler's existing tick-driven self-heal (first
+    // tick post-wake) rather than a fragile NSWorkspace observer — same reasoning
+    // as `looks_like_wake` below.
+    let alarm_presented = should_reassert_overlay(&lock_resilient(&ACTIVE_ALARMS));
+    if alarm_presented {
+        let handle = app.clone();
+        let _ = app.run_on_main_thread(move || {
+            if let Err(e) = crate::overlay::show_overlays(&handle) {
+                log::error!("overlay self-heal re-assert failed: {e}");
+            }
+        });
+    }
+
     let settings = app.state::<crate::settings::SettingsStore>().get();
     let cfg = build_alarm_config(&settings);
     let (events, fetch_outcome) = upcoming_alarm_events(&settings);
@@ -794,6 +827,22 @@ mod tests {
         assert!(looks_like_wake(30, 120));
         assert!(looks_like_wake(30, 3600));
         assert!(looks_like_wake(1, 600));
+    }
+
+    #[test]
+    fn reasserts_overlay_only_when_an_alarm_is_presented() {
+        // tick()'s sleep/wake self-heal: re-front the takeover overlay IFF a fired
+        // alarm is still on screen. Empty set → no-op (never conjure an overlay);
+        // any presented card → re-assert, so a panel dropped across sleep comes
+        // back instead of an audible, un-dismissable looping alarm.
+        assert!(!should_reassert_overlay(&[]), "nothing presented → no re-assert");
+        let presented = vec![
+            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
+        ];
+        assert!(
+            should_reassert_overlay(&presented),
+            "a presented alarm → re-assert"
+        );
     }
 
     #[test]
