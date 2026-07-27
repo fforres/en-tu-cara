@@ -90,14 +90,28 @@ fn lock_resilient<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// Whether `tick()` should re-assert the takeover overlay this pass: true exactly
-/// when an alarm is still presented. Drives the sleep/wake self-heal — a fired
-/// alarm the user hasn't dismissed can lose its panels across system sleep while
-/// the sound loop keeps beating, so we re-front (or recreate) them every tick; an
-/// empty set must stay a no-op so an overlay never pops out of nowhere. Pure, for
-/// testing.
-fn should_reassert_overlay(active_alarms: &[serde_json::Value]) -> bool {
+/// Whether `tick()` should DISPATCH an overlay re-assert to the main thread this
+/// pass: true exactly when an alarm is still presented. Drives the sleep/wake
+/// self-heal — a fired alarm the user hasn't dismissed can lose its panels across
+/// system sleep while the sound loop keeps beating, so we re-front (or recreate)
+/// them every tick; an empty set must stay a no-op so an overlay never pops out
+/// of nowhere. Pure, for testing.
+fn should_dispatch_reassert(active_alarms: &[serde_json::Value]) -> bool {
     !active_alarms.is_empty()
+}
+
+/// The main-thread half of the re-assert guard, re-read at EXECUTION time.
+///
+/// Load-bearing, not redundant: `should_dispatch_reassert` runs on the SCHEDULER
+/// thread and the show is queued onto the MAIN thread, so a dismiss/snooze can
+/// land in between — clearing ACTIVE_ALARMS and closing the panels. The queued
+/// closure would then find no live panels, BUILD FRESH ONES with an empty card
+/// set, and restart the sound loop: an audible alarm the user just dismissed,
+/// i.e. exactly the failure this self-heal exists to prevent. Re-reading the live
+/// set here makes the closure a no-op in that interleaving. The reverse order is
+/// already safe — we re-front, then the dismiss closes and silences.
+fn reassert_still_warranted() -> bool {
+    !lock_resilient(&ACTIVE_ALARMS).is_empty()
 }
 
 #[tauri::command]
@@ -403,16 +417,23 @@ fn tick(app: &tauri::AppHandle) -> u64 {
     // the display reconfiguration drops the panels while the (idempotent) sound
     // loop keeps beating, leaving the user with an audible alarm and no way to
     // stop it but force-quitting the app (reported). Re-assert on every tick so an
-    // active alarm ALWAYS has a visible, dismissable overlay: show_overlays
-    // re-fronts live panels and recreates lost ones (a freshly built overlay
-    // re-pulls ACTIVE_ALARMS on mount), and is a cheap no-op when the panels are
-    // already up. This rides the scheduler's existing tick-driven self-heal (first
-    // tick post-wake) rather than a fragile NSWorkspace observer — same reasoning
-    // as `looks_like_wake` below.
-    let alarm_presented = should_reassert_overlay(&lock_resilient(&ACTIVE_ALARMS));
-    if alarm_presented {
+    // active alarm ALWAYS has a visible, dismissable overlay: show_overlays snaps
+    // surviving panels back onto the CURRENT display layout, re-fronts them, and
+    // recreates lost ones (a freshly built overlay re-pulls ACTIVE_ALARMS on
+    // mount), and is a cheap no-op when the panels are already up and correctly
+    // placed. This rides the scheduler's existing tick-driven self-heal (first tick
+    // post-wake) rather than a fragile NSWorkspace observer — same reasoning as
+    // `looks_like_wake` below.
+    //
+    // The guard is checked TWICE on purpose: once here to avoid the main-thread
+    // hop, and again inside the closure because a dismiss can land in between —
+    // see `reassert_still_warranted`.
+    if should_dispatch_reassert(&lock_resilient(&ACTIVE_ALARMS)) {
         let handle = app.clone();
         let _ = app.run_on_main_thread(move || {
+            if !reassert_still_warranted() {
+                return; // dismissed/snoozed between dispatch and here — stay down.
+            }
             if let Err(e) = crate::overlay::show_overlays(&handle) {
                 log::error!("overlay self-heal re-assert failed: {e}");
             }
@@ -829,20 +850,122 @@ mod tests {
         assert!(looks_like_wake(1, 600));
     }
 
-    #[test]
-    fn reasserts_overlay_only_when_an_alarm_is_presented() {
-        // tick()'s sleep/wake self-heal: re-front the takeover overlay IFF a fired
-        // alarm is still on screen. Empty set → no-op (never conjure an overlay);
-        // any presented card → re-assert, so a panel dropped across sleep comes
-        // back instead of an audible, un-dismissable looping alarm.
-        assert!(!should_reassert_overlay(&[]), "nothing presented → no re-assert");
-        let presented = vec![
-            serde_json::json!({"occurrence_key": "(A @ t)", "kind": "t_zero"}),
-        ];
-        assert!(
-            should_reassert_overlay(&presented),
-            "a presented alarm → re-assert"
+    /// The overlay self-heal (`tick`'s sleep/wake re-assert) is the one place that
+    /// reads AND is raced against the ACTIVE_ALARMS global, so its tests must own
+    /// that static exclusively. Cargo runs tests in parallel threads inside ONE
+    /// process — without this they'd leak phantom cards into each other. Clears on
+    /// acquire AND on drop so neither an ordering nor a panicking test can strand a
+    /// card in the global.
+    mod overlay_self_heal {
+        use super::*;
+
+        static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+        struct Exclusive(
+            // Held for the lifetime of the guard; never read.
+            #[allow(dead_code)] std::sync::MutexGuard<'static, ()>,
         );
+        impl Drop for Exclusive {
+            fn drop(&mut self) {
+                lock_resilient(&ACTIVE_ALARMS).clear();
+            }
+        }
+        fn exclusive() -> Exclusive {
+            let g = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            lock_resilient(&ACTIVE_ALARMS).clear();
+            Exclusive(g)
+        }
+
+        fn card(key: &str) -> serde_json::Value {
+            serde_json::json!({"occurrence_key": key, "kind": "t_zero", "title": "Standup"})
+        }
+
+        #[test]
+        fn dispatches_a_reassert_only_when_an_alarm_is_presented() {
+            // IFF a fired alarm is still on screen. Empty set → no-op (an overlay
+            // must never pop out of nowhere); any presented card → re-assert, so a
+            // panel dropped across sleep comes back instead of leaving an audible,
+            // un-dismissable looping alarm.
+            assert!(!should_dispatch_reassert(&[]), "nothing presented → no re-assert");
+            assert!(
+                should_dispatch_reassert(&[card("(A @ t)")]),
+                "a presented alarm → re-assert"
+            );
+        }
+
+        #[test]
+        fn a_dismiss_between_dispatch_and_the_main_thread_cancels_the_reassert() {
+            // THE regression this guards: the dispatch decision happens on the
+            // scheduler thread, the show runs later on the main thread. A dismiss
+            // landing in that window clears ACTIVE_ALARMS and closes the panels —
+            // if the queued closure still ran, show_overlays would find no live
+            // panels, BUILD FRESH ONES with zero cards, and restart the sound loop.
+            // That is an audible alarm the user just dismissed: the exact failure
+            // this self-heal exists to prevent.
+            let _x = exclusive();
+            lock_resilient(&ACTIVE_ALARMS).push(card("(A @ t)"));
+            assert!(
+                should_dispatch_reassert(&lock_resilient(&ACTIVE_ALARMS)),
+                "scheduler thread sees a presented alarm and dispatches"
+            );
+
+            // …user hits Dismiss before the main thread drains the queue.
+            lock_resilient(&ACTIVE_ALARMS).clear();
+
+            assert!(
+                !reassert_still_warranted(),
+                "a just-dismissed overlay must NOT be resurrected by an in-flight re-assert"
+            );
+        }
+
+        #[test]
+        fn a_reassert_still_fires_when_the_alarm_outlives_the_dispatch() {
+            // The other half: nothing changed in the gap, so the queued closure
+            // must still act — otherwise the self-heal never heals anything.
+            let _x = exclusive();
+            lock_resilient(&ACTIVE_ALARMS).push(card("(A @ t)"));
+            assert!(reassert_still_warranted(), "alarm still presented → go ahead and re-assert");
+        }
+
+        #[test]
+        fn snoozing_the_last_card_also_stops_the_reassert() {
+            // Snooze/ignore route through the same ACTIVE_ALARMS removal as dismiss
+            // (finish_one), so they must equally stop the self-heal from bringing a
+            // snoozed alarm back on the next tick.
+            let _x = exclusive();
+            *lock_resilient(&ACTIVE_ALARMS) = vec![card("(A @ t)"), card("(B @ t)")];
+
+            let remaining = retain_other_occurrences(&lock_resilient(&ACTIVE_ALARMS), "(A @ t)");
+            *lock_resilient(&ACTIVE_ALARMS) = remaining;
+            assert!(
+                reassert_still_warranted(),
+                "B is still on screen — the overlay must keep being re-asserted"
+            );
+
+            let remaining = retain_other_occurrences(&lock_resilient(&ACTIVE_ALARMS), "(B @ t)");
+            *lock_resilient(&ACTIVE_ALARMS) = remaining;
+            assert!(
+                !reassert_still_warranted(),
+                "last card snoozed → overlay closes and stays closed"
+            );
+        }
+
+        #[test]
+        fn a_reasserted_overlay_repulls_its_cards_from_active_alarms() {
+            // Pins the claim the self-heal rests on: when the panels were LOST
+            // (not just hidden), show_overlays rebuilds them and the fresh webview
+            // pulls the card set via get_active_alarms on mount. If a re-assert
+            // ever cleared or bypassed ACTIVE_ALARMS, the user would get a blank
+            // takeover with a beating sound and nothing to dismiss.
+            let _x = exclusive();
+            let (a, b) = (card("(A @ t)"), card("(B @ t)"));
+            *lock_resilient(&ACTIVE_ALARMS) = vec![a.clone(), b.clone()];
+            assert_eq!(
+                get_active_alarms(),
+                vec![a, b],
+                "a rebuilt panel must find every presented card still there"
+            );
+        }
     }
 
     #[test]

@@ -22,14 +22,25 @@ pub fn play(name: &str) {
     }
 }
 
+/// Claim the right to run THE alert loop: true for the caller that flips the flag,
+/// false for everyone after. The one guarantee that keeps exactly one loop thread
+/// alive no matter how often `start_alert_loop` is called — load-bearing now that
+/// the scheduler's overlay self-heal re-asserts (and so re-enters this) on EVERY
+/// tick while an alarm is presented. N stacked loops would beat N× as fast and
+/// each ignore the others' `stop_alert_loop`. Split out for testing.
+fn claim_alert_loop() -> bool {
+    !ALERTING.swap(true, Ordering::SeqCst)
+}
+
 /// Start the repeating alert sound. Idempotent — a second call while already
-/// alerting does nothing (T-0 firing while the T-5 overlay is still up).
+/// alerting does nothing (T-0 firing while the T-5 overlay is still up, or the
+/// scheduler's per-tick overlay re-assert).
 pub fn start_alert_loop(app: &tauri::AppHandle) {
     // Checkpoint scripts run dozens of overlay cycles — spare the human's ears.
     if std::env::var("ENTUCARA_SILENT").is_ok_and(|v| v == "1") {
         return;
     }
-    if ALERTING.swap(true, Ordering::SeqCst) {
+    if !claim_alert_loop() {
         return; // already looping
     }
     let app = app.clone();
@@ -56,4 +67,26 @@ pub fn start_alert_loop(app: &tauri::AppHandle) {
 /// Stop the repeating alert sound (dismiss/snooze/overlay close).
 pub fn stop_alert_loop() {
     ALERTING.store(false, Ordering::SeqCst);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_one_alert_loop_can_ever_be_claimed() {
+        // The scheduler's overlay self-heal calls start_alert_loop on EVERY tick
+        // while an alarm is presented, so this flag is what stands between us and N
+        // stacked loop threads — which would beat N× as fast and each ignore the
+        // others' stop_alert_loop, leaving a sound the user cannot silence.
+        stop_alert_loop(); // known state (the flag is process-global)
+        assert!(claim_alert_loop(), "first caller runs the loop");
+        for _ in 0..5 {
+            assert!(!claim_alert_loop(), "re-entry while alerting must not start a second loop");
+        }
+        // Dismiss → the next alarm can claim it again (not a one-shot latch).
+        stop_alert_loop();
+        assert!(claim_alert_loop(), "after a stop, the next alarm starts the loop again");
+        stop_alert_loop();
+    }
 }
