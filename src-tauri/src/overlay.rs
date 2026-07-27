@@ -302,19 +302,15 @@ pub fn show_overlays(app: &AppHandle) -> tauri::Result<Vec<String>> {
     Ok(labels)
 }
 
-/// Take the overlay down: stop the sound, drop the presented card set, close every
-/// panel.
+/// Silence the alert and close every overlay panel.
 ///
-/// Clearing ACTIVE_ALARMS is part of the contract, not an extra. Since the
-/// scheduler re-asserts the overlay every tick while a card is presented,
-/// "panels closed but ACTIVE_ALARMS non-empty" is a SELF-RESURRECTING state — the
-/// next tick would rebuild the panels and restart the sound. Every caller today
-/// clears the set first (this is then a no-op), but this is an exposed IPC command,
-/// so it must not depend on callers to hold the invariant.
-#[tauri::command]
-pub fn close_overlays(app: AppHandle) {
+/// NOT an IPC command, and not to be called directly: `presentation` owns when the
+/// takeover comes down, because panels have to stay a function of the card set.
+/// Closing panels while cards remain is a SELF-RESURRECTING state — the scheduler's
+/// next tick would rebuild them and restart the sound. This used to be exposed to
+/// the webview, which made that state one `invoke` away.
+pub(crate) fn close_overlays(app: &AppHandle) {
     crate::sound::stop_alert_loop();
-    lock_resilient(&crate::scheduler::ACTIVE_ALARMS).clear();
     write_overlay_state(&[]);
     for (label, _) in app.webview_windows() {
         if label.starts_with(OVERLAY_LABEL_PREFIX) {
@@ -364,7 +360,7 @@ pub fn maybe_run_spike(app: &AppHandle) {
         let _ = handle.run_on_main_thread({
             let h = handle.clone();
             move || {
-                close_overlays(h.clone());
+                close_overlays(&h);
                 println!("SPIKE_OVERLAY dismissed");
             }
         });
